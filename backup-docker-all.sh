@@ -1,11 +1,11 @@
 #!/bin/bash
 # =======================================================================
-# BACKUP DOCKER ALL SCRIPT for all Containers on a Server 
+# BACKUP DOCKER ALL SCRIPT for all Containers on a Server
 # by dataCore
 # inspired by https://github.com/alaub81/backup_docker_scripts/blob/main/backup-docker-volume.sh
 #
 # iterates over all docker container and backups each docker container with the corresponding 'docker-backup.sh'
-# 
+#
 # HISTORY
 # 2024-04-15 Initial Version
 # 2025-07-14 Redesign with generic backup scripts

@@ -1,6 +1,6 @@
 #!/bin/bash
 # =======================================================================
-# UPDATE DOCKER ALL SCRIPT for all Containers on a Server 
+# UPDATE DOCKER ALL SCRIPT for all Containers on a Server
 # by dataCore
 #
 # iterates over all docker container and check if there is an update
