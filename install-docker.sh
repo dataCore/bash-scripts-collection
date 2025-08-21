@@ -10,14 +10,17 @@ apt install docker-ce docker-ce-cli containerd.io docker-compose-plugin -y && \
 
 cat <<'EOF' > /etc/docker/daemon.json
 {
-    "default-address-pools":
-    [
-        {"base":"172.17.0.0/16","size":24}
+    "default-address-pools": [
+      {
+        "base": "172.17.0.0/12",
+        "size": 24
+      }
     ],
+    "live-restore": true,
     "log-driver": "json-file",
     "log-opts": {
-    "max-size": "100m",
-    "max-file": "2"
+      "max-size": "100m",
+      "max-file": "2"
   }
 }
 EOF
