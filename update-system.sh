@@ -41,11 +41,11 @@ apt-get clean -y
 
 # Check if a reboot is required
 if [ -f /var/run/reboot-required ]; then
-  if [ "$AUTO_CONFIRM" = true ]; then
+  if [ "$AUTO_REBOOT" = true ]; then
     echo "[✓] Auto-confirm enabled. Rebooting now..."
     reboot
   else
-    read -p "System reboot is required. Do you want to reboot now? (y/n): " answer
+    read -r -p "System reboot is required. Do you want to reboot now? (y/n): " answer
     if [ "$answer" = "y" ] || [ "$answer" = "Y" ]; then
       echo "[✓] Rebooting now..."
       reboot

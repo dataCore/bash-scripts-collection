@@ -1,3 +1,4 @@
+#!/bin/bash
 # WoL.sh
 # Project homepage: https://leesteve.tk/wol.sh
 # Version 0.1 (20200302) (Pre-release)
@@ -42,13 +43,13 @@ This utility sends a magic packet to wake up a machine properly configured to li
 else
     
     # Remove separators from MAC address input
-    targetmac=$(echo $1 | sed 's/[ :-]//g')
+    targetmac=$(echo "$1" | sed 's/[ :-]//g')
     
     # Magic packet consists of 12 f followed by 16 repetitions of target's MAC address, read https://en.wikipedia.org/wiki/Wake-on-LAN#Magic_packet
     magicpacket=$(printf "f%.0s" {1..12}; printf "$targetmac%.0s" {1..16})
     
     # Hex-escape
-    magicpacket=$(echo $magicpacket | sed -e 's/../\\x&/g')
+    magicpacket=$(echo "$magicpacket" | sed -e 's/../\\x&/g')
     
     # Apply defaults
     if [ $# -ge 3 ]; then
@@ -64,7 +65,7 @@ else
     
     # Send magic packet
     printf "Sending magic packet..." 
-    echo -e $magicpacket | nc -w1 -u $targetip $targetport
+    echo -e "$magicpacket" | nc -w1 -u "$targetip" "$targetport"
     printf " Done!"
     
 fi

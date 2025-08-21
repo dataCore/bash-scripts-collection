@@ -24,8 +24,8 @@ This repository contains a collection of useful Bash scripts for e.g. managing D
 
 ## 🛠️ Installation
 
-- Create Folder: `sudo mkdir -p /usr/bin/datacore/bash` 
-- Clone the Project: 'git clone https://github.com/dataCore/bash-scripts-collection.git /usr/bin/datacore/bash/' 
+- Create Folder: `sudo mkdir -p /usr/bin/datacore/bash`
+- Clone the Project: `git clone https://github.com/dataCore/bash-scripts-collection.git /usr/bin/datacore/bash/`
 - Execute the Script-Linker: `bash /usr/bin/datacore/bash/link.sh`
 - Test it:  `show-lastreboot`
 

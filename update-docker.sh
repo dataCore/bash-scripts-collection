@@ -31,7 +31,7 @@ done | sort -u | head -n 1)
 # =======================================================================
 echo -n "🔍 Checking for newer Docker images for '${PROJECTNAME}'..."
 # Get all images used in the current docker-compose.yml
-cd $WORKINGDIR
+cd "$WORKINGDIR"
 
 CONTAINERS=$(docker compose ps -q 2>/dev/null || true)
 for CONTAINER in $CONTAINERS; do 
@@ -46,14 +46,14 @@ for CONTAINER in $CONTAINERS; do
     if [[ -n "$AUTO" ]]; then
       answer="$AUTO"
     else
-      read -p "Want to continue with the update? (y/n) with a backup? (b): " answer
+      read -r -p "Want to continue with the update? (y/n) with a backup? (b): " answer
     fi
     if [[ $answer == "n" ]]; then
       echo "❌ Update canceled."
       exit
     elif [[ $answer == "b" ]]; then
       echo "📦 Creating backup..."
-      backup-docker ${PROJECTNAME}
+      backup-docker "${PROJECTNAME}"
     fi
     # again pull everything
     docker compose pull

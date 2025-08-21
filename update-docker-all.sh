@@ -22,12 +22,11 @@ export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 set -euo pipefail
 trap 'echo -e "\n❌ Error in Line $LINENO. Update Script canceled."; exit 1' ERR
 # =======================================================================
-DOCKERROOTDIR=$(docker info --format '{{ .DockerRootDir }}')
 ALLCONTAINER=$(docker ps --format '{{.Names}}')
-ALLPROJECTS=$(for i in $ALLCONTAINER; do docker inspect --format '{{ index .Config.Labels "com.docker.compose.project"}}' $i; done | sort -u)
+ALLPROJECTS=$(for i in $ALLCONTAINER; do docker inspect --format '{{ index .Config.Labels "com.docker.compose.project"}}' "$i"; done | sort -u)
 ### Do the stuff
 for PROJECTNAME in $ALLPROJECTS; do
-	update-docker $PROJECTNAME --auto=y
+	update-docker "$PROJECTNAME" --auto=y
 done
 docker system prune -f
 echo "Script to update all Docker Compose Projects completed"

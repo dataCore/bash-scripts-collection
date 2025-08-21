@@ -37,12 +37,11 @@ echo "CURRENTDATE=${TIMESTAMP}"
 echo "BACKUPDIR=${BACKUPDIR}"
 echo "BACKUPDURATIONDAYS=${BACKUPDURATIONDAYS}"
 # =======================================================================
-DOCKERROOTDIR=$(docker info --format '{{ .DockerRootDir }}')
 ALLCONTAINER=$(docker ps --format '{{.Names}}')
-ALLPROJECTS=$(for i in $ALLCONTAINER; do docker inspect --format '{{ index .Config.Labels "com.docker.compose.project"}}' $i; done | sort -u)
+ALLPROJECTS=$(for i in $ALLCONTAINER; do docker inspect --format '{{ index .Config.Labels "com.docker.compose.project"}}' "$i"; done | sort -u)
 ### Do the stuff
 for PROJECTNAME in $ALLPROJECTS; do
-	backup-docker $PROJECTNAME $BACKUPDIR $BACKUPDURATIONDAYS
+	backup-docker "$PROJECTNAME" "$BACKUPDIR" "$BACKUPDURATIONDAYS"
 done
 TIMESTAMP=$(date +"%Y%m%d_%H%M")
 echo "$TIMESTAMP Backup for all Docker Compose Projects completed"
