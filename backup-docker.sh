@@ -82,11 +82,11 @@ print_duration $DURATION
 # =======================================================================
 # BACKUP DOCKER VOLUMES AND DATABASES
 # get all volumes of the given docker compose and ignore databases 
-CONTAINERS=$(docker compose ps -q 1>/dev/null || true)
+CONTAINERS=$(docker compose ps -q 2>/dev/null || true)
 for cont in $CONTAINERS; do 
-	IMAGE=$(docker inspect --format '{{.Config.Image}}' "$cont" 1>/dev/null)
-	CONTAINERNAME=$(docker inspect --format '{{.Name}}' "$cont" 1>/dev/null | sed 's/^\/\(.*\)/\1/')
-	VOLUMES=$(docker inspect --format '{{ range .Mounts }}{{ .Name }}{{ "\n" }}{{ end }}' "$cont" 1>/dev/null || true | grep -v '^$')
+	IMAGE=$(docker inspect --format '{{.Config.Image}}' "$cont" 2>/dev/null)
+	CONTAINERNAME=$(docker inspect --format '{{.Name}}' "$cont" 2>/dev/null | sed 's/^\/\(.*\)/\1/')
+	VOLUMES=$(docker inspect --format '{{ range .Mounts }}{{ .Name }}{{ "\n" }}{{ end }}' "$cont" 2>/dev/null || true | grep -v '^$')
 	for vol in $VOLUMES; do
 		START=$(date +%s)
 		VOLUMENAME=${vol##*/}
