@@ -16,9 +16,9 @@
 # Check for -y flag to skip confirmation
 AUTO_REBOOT=false
 for arg in "$@"; do
-	if [ "$arg" == "-y" ]; then
-		AUTO_REBOOT=true
-	fi
+    if [ "$arg" == "-y" ]; then
+        AUTO_REBOOT=true
+    fi
 done
 
 # Deactivate interactive menues
@@ -40,18 +40,18 @@ apt-get clean -y
 
 # Check if a reboot is required
 if [ -f /var/run/reboot-required ]; then
-  	if [ "$AUTO_REBOOT" = true ]; then
-  		echo "[✓] Auto-confirm enabled. Rebooting now..."
-  		reboot
-  	else
-  		read -r -p "System reboot is required. Do you want to reboot now? (y/n): " answer
-  		if [ "$answer" = "y" ] || [ "$answer" = "Y" ]; then
-  			echo "[✓] Rebooting now..."
-  			reboot
-  		else
-  			echo "[i] Reboot skipped. Please reboot manually later."
-  		fi
-  	fi
+    if [ "$AUTO_REBOOT" = true ]; then
+        echo "[✓] Auto-confirm enabled. Rebooting now..."
+        reboot
+    else
+        read -r -p "System reboot is required. Do you want to reboot now? (y/n): " answer
+        if [ "$answer" = "y" ] || [ "$answer" = "Y" ]; then
+            echo "[✓] Rebooting now..."
+            reboot
+        else
+            echo "[i] Reboot skipped. Please reboot manually later."
+        fi
+    fi
 fi
 
 echo "[✓] All done."
