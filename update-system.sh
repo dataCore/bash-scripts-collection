@@ -24,6 +24,9 @@ done
 # Deactivate interactive menues
 export DEBIAN_FRONTEND=noninteractive
 
+# Update the script collection
+update-scripts
+
 # Start update
 apt-get update -y
 apt-get upgrade -y
