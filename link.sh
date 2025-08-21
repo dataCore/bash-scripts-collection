@@ -16,7 +16,7 @@ scripts=(
 )
 
 for entry in "${scripts[@]}"; do
-	IFS=":" read -r script linkname <<<"$entry"
-  chmod 710 "$folder/$script"
-  ln -sf "$folder/$script" "$linkname"
+  	IFS=":" read -r script linkname <<<"$entry"
+  	chmod 710 "$folder/$script"
+  	ln -sf "$folder/$script" "$linkname"
 done

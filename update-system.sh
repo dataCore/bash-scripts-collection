@@ -25,7 +25,7 @@ done
 export DEBIAN_FRONTEND=noninteractive
 
 # Update the script collection
-update-scripts	fi
+update-scripts
 
 # Start update
 apt-get update -y

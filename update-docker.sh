@@ -34,6 +34,7 @@ echo -n "🔍 Checking for newer Docker images for '${PROJECTNAME}'..."
 cd "$WORKINGDIR"
 
 CONTAINERS=$(docker compose ps -q 2>/dev/null || true)
+for CONTAINER in $CONTAINERS; do 
   	IMAGE=$(docker inspect --format='{{.Config.Image}}' "$CONTAINER")
   	# Pull the latest image (but don't run it)
   	docker pull "$IMAGE" >/dev/null

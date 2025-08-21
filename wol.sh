@@ -29,8 +29,8 @@
 if [ $# -le 0 ]; then
   	# Display help if no arguments
   	printf "Wake-On-LAN Utility
-       This utility sends a magic packet to wake up a machine properly configured to listen to Wake-On-LAN/WLAN requests.
-       Usage:  WoL.sh [MAC] [IP] [Port]
+          This utility sends a magic packet to wake up a machine properly configured to listen to Wake-On-LAN/WLAN requests.
+          Usage:  WoL.sh [MAC] [IP] [Port]
     
     MAC:    mandatory, MAC address of the target machine
     

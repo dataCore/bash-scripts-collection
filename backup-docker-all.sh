@@ -47,4 +47,3 @@ TIMESTAMP=$(date +"%Y%m%d_%H%M")
 echo "$TIMESTAMP Backup for all Docker Compose Projects completed"
 # =======================================================================
 echo "===============> End of backup-docker-all SCRIPT for: '${HOSTNAME}' "
-
