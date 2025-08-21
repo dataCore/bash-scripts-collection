@@ -6,8 +6,6 @@ scripts=(
   "backup-docker.sh:backup-docker"
   "backup-docker-all.sh:backup-docker-all"
   "install-docker.sh:install-docker"
-  "install-sshuser-datacore.sh:install-sshuser-datacore"
-  "install-sshuser-itp.sh:install-sshuser-itp"
   "restore-docker.sh:restore-docker"
   "show-lastreboot.sh:show-lastreboot"
   "update-docker.sh:update-docker"
