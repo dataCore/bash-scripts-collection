@@ -67,7 +67,7 @@ print_status() {
 # Print Duration
 print_duration() {
 	local duration=$1
-	printf "✅ (%02d:%02d:%02d)\n" $((duration/3600)) $(((duration%3600)/60)) $((duration%60))
+	printf "✅ (%02d:%02d:%02d)\n" $((duration / 3600)) $(((duration % 3600) / 60)) $((duration % 60))
 }
 # =======================================================================
 # BACKUP DOCKER COMPOSE

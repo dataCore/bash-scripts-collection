@@ -4,9 +4,9 @@
 # by dataCore
 #
 # iterates over all docker container and check if there is an update
-# 
 #
-# Usage: update-docker-all 
+#
+# Usage: update-docker-all
 #
 # =======================================================================
 
