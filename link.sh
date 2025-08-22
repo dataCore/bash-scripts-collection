@@ -1,5 +1,5 @@
 #!/bin/bash
-folder="/opt/scripts"
+folder="/usr/bin/datacore/bash"
 
 scripts=(
     "install-docker.sh:install-docker"

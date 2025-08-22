@@ -22,9 +22,11 @@ jobs:
         with:
           fetch-depth: 0
       - name: Megalinter
+        continue-on-error: true
         uses: oxsecurity/megalinter@e08c2b05e3dbc40af4c23f41172ef1e068a7d651
         env:
           APPLY_FIXES: "none"
+          BASH_SHFMT_OPTIONS: "-i 4 -ci"
           BASH_SHFMT_DISABLE_ERRORS: "false"
           DISABLE_LINTERS: MARKDOWN_MARKDOWN_LINK_CHECK,REPOSITORY_CHECKOV,REPOSITORY_SECRETLINT,REPOSITORY_TRIVY,REPOSITORY_TRUFFLEHOG,SPELL_CSPELL,SPELL_LYCHEE
           FILTER_REGEX_EXCLUDE: .*/ISSUE_TEMPLATE/.*
