@@ -8,19 +8,19 @@ This repository contains a collection of useful Bash scripts for e.g. managing D
 
 ## 🗂️ Contents
 
-| Script Name            | Description                                                                                         |
-|------------------------|-----------------------------------------------------------------------------------------------------|
-| `install-docker.sh`    | Installs Docker on a Linux system.                                                                  |
-| `backup-docker.sh`     | Creates a backup of a single Docker container.                                                      |
-| `backup-docker-all.sh` | Creates backups of all running Docker containers.                                                   |
-| `restore-docker.sh`    | Restores a Docker container from a backup file.                                                     |
-| `update-docker.sh`     | Updates a single Docker container.                                                                  |
-| `update-docker-all.sh` | Updates all Docker containers.                                                                      |
-| `update-scripts.sh`    | Updates this scripts collection itself.                                                             |
-| `update-system.sh`     | Performs all Linux system updates and also updates the scripts itself and makes a reboot if needed. |
-| `show-lastreboot.sh`   | Displays the last system reboot time.                                                               |
-| `link.sh`              | Creates symbolic links for all scripts in this collection.                                          |
-| `wol.sh`               | Sends a Wake-on-LAN packet to a device on the network.                                              |
+| Script Name            | Parameters                                                                   | Description                                                                                         |
+|------------------------|------------------------------------------------------------------------------|-----------------------------------------------------------------------------------------------------|
+| `install-docker.sh`    |                                                                              | Installs Docker on a Linux system.                                                                  |
+| `backup-docker.sh`     | {DOCKERCOMPOSE-PROJECTNAME} {BACKUPDIR:/mnt/backup/} {BACKUPDURATIONDAYS:2}  | Creates a backup of a single Docker container.                                                      |
+| `backup-docker-all.sh` | {BACKUPDIR:/mnt/backup/} {BACKUPDURATIONDAYS:2}                              | Creates backups of all running Docker containers.                                                   |
+| `restore-docker.sh`    | {BACKUPDIR:/mnt/backup/}                                                     | Restores a Docker container from a backup file.                                                     |
+| `update-docker.sh`     | {DOCKERCOMPOSE-PROJECTNAME} --auto={y,n,b}                                   | Updates a single Docker container. Autorestart = yes, no, with backup                               |
+| `update-docker-all.sh` |                                                                              | Updates all Docker containers with --auto=y                                                         |
+| `update-scripts.sh`    |                                                                              | Updates this scripts collection itself.                                                             |
+| `update-system.sh`     | -y (optional: reboot automaticly)                                            | Performs all Linux system updates and also updates the scripts itself and makes a reboot if needed. |
+| `show-lastreboot.sh`   |                                                                              | Displays the last system reboot time.                                                               |
+| `link.sh`              |                                                                              | Creates symbolic links for all scripts in this collection.                                          |
+| `wol.sh`               |                                                                              | Sends a Wake-on-LAN packet to a device on the network.                                              |
 
 ## 🛠️ Installation
 

@@ -91,7 +91,7 @@ for cont in $CONTAINERS; do
     for vol in $VOLUMES; do
         START=$(date +%s)
         VOLUMENAME=${vol##*/}
-        if echo "$IMAGE" | grep -qi "mariadb"; then
+        if echo "$IMAGE" | grep -qi "^mariadb"; then
             # =======================================================================
             # BACKUP MariaDB
             print_status "  🐬 MariaDB: ${PROJECTNAME}.${CONTAINERNAME}.mariadbdump.sql.gz... "
@@ -99,7 +99,7 @@ for cont in $CONTAINERS; do
             CONTAINERENV_DBPW=$(docker exec "${cont}" sh -c 'echo "$MYSQL_ROOT_PASSWORD $DB_ROOT_PASSWORD"')
             docker exec "${cont}" sh -c 'exec mariadb-dump -u root -p"$0" --all-databases 1>/dev/null' "${CONTAINERENV_DBPW}" | gzip -9 >"${TEMPDIR}/${OUTPUT}"
             cp "${TEMPDIR}/${OUTPUT}" "${PROJECTBACKUPDIR}" && rm "${TEMPDIR}/${OUTPUT}"
-        elif echo "$IMAGE" | grep -qi "mysql"; then
+        elif echo "$IMAGE" | grep -qi "^mysql"; then
             # =======================================================================
             # BACKUP MySQL
             print_status "  🐬 MySQL: ${PROJECTNAME}.${CONTAINERNAME}.mysqldump.sql.gz... "
@@ -107,7 +107,7 @@ for cont in $CONTAINERS; do
             CONTAINERENV_DBPW=$(docker exec "${cont}" sh -c 'echo "$MYSQL_ROOT_PASSWORD $DB_ROOT_PASSWORD"')
             docker exec "${cont}" sh -c 'exec mysqldump -u root -p"$0" --all-databases 1>/dev/null' "${CONTAINERENV_DBPW}" | gzip -9 >"${TEMPDIR}/${OUTPUT}"
             cp "${TEMPDIR}/${OUTPUT}" "${PROJECTBACKUPDIR}" && rm "${TEMPDIR}/${OUTPUT}"
-        elif echo "$IMAGE" | grep -qi "postgres"; then
+        elif echo "$IMAGE" | grep -qi "^postgres"; then
             # =======================================================================
             # BACKUP PostgreSQL
             print_status "  🐘️ PostgreSQL: ${PROJECTNAME}.${CONTAINERNAME}.postgredump.sql.gz... "
@@ -115,7 +115,7 @@ for cont in $CONTAINERS; do
             CONTAINERENV_DBUSER=$(docker exec "${cont}" sh -c 'echo "$POSTGRES_USER"')
             docker exec "${cont}" sh -c 'exec pg_dumpall -U "$0"' "${CONTAINERENV_DBUSER}" | gzip -9 >"${TEMPDIR}/${OUTPUT}"
             cp "${TEMPDIR}/${OUTPUT}" "${PROJECTBACKUPDIR}" && rm "${TEMPDIR}/${OUTPUT}"
-        elif echo "$IMAGE" | grep -qi "mongo"; then
+        elif echo "$IMAGE" | grep -qi "^mongo"; then
             # =======================================================================
             # BACKUP MongoDB
             if echo "$vol" | grep -qi "config"; then
