@@ -9,7 +9,8 @@
 # Usage: update-docker-all
 #
 # =======================================================================
-
+# START scripts
+update-scripts
 # START script
 echo "===============> UPDATE 🔄 DOCKER ALL SCRIPT"
 HOSTNAME="$(hostname)"

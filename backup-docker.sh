@@ -97,7 +97,7 @@ for cont in $CONTAINERS; do
             print_status "  🐬 MariaDB: ${PROJECTNAME}.${CONTAINERNAME}.mariadbdump.sql.gz... "
             OUTPUT=${TIMESTAMP}_${PROJECTNAME}.${CONTAINERNAME}.mariadbdump.sql.gz
             CONTAINERENV_DBPW=$(docker exec "${cont}" sh -c 'echo "$MYSQL_ROOT_PASSWORD $DB_ROOT_PASSWORD"')
-            docker exec "${cont}" sh -c 'exec mariadb-dump -u root -p"$0" --all-databases 1>/dev/null' "${CONTAINERENV_DBPW}" | gzip -9 >"${TEMPDIR}/${OUTPUT}"
+            docker exec "${cont}" sh -c 'exec mariadb-dump -u root -p"$0" --all-databases' "${CONTAINERENV_DBPW}" | gzip -9 >"${TEMPDIR}/${OUTPUT}"
             cp "${TEMPDIR}/${OUTPUT}" "${PROJECTBACKUPDIR}" && rm "${TEMPDIR}/${OUTPUT}"
         elif echo "$IMAGE" | grep -qi "^mysql"; then
             # =======================================================================
@@ -105,7 +105,7 @@ for cont in $CONTAINERS; do
             print_status "  🐬 MySQL: ${PROJECTNAME}.${CONTAINERNAME}.mysqldump.sql.gz... "
             OUTPUT=${TIMESTAMP}_${PROJECTNAME}.${CONTAINERNAME}.mysqldump.sql.gz
             CONTAINERENV_DBPW=$(docker exec "${cont}" sh -c 'echo "$MYSQL_ROOT_PASSWORD $DB_ROOT_PASSWORD"')
-            docker exec "${cont}" sh -c 'exec mysqldump -u root -p"$0" --all-databases 1>/dev/null' "${CONTAINERENV_DBPW}" | gzip -9 >"${TEMPDIR}/${OUTPUT}"
+            docker exec "${cont}" sh -c 'exec mysqldump -u root -p"$0" --all-databases' "${CONTAINERENV_DBPW}" | gzip -9 >"${TEMPDIR}/${OUTPUT}"
             cp "${TEMPDIR}/${OUTPUT}" "${PROJECTBACKUPDIR}" && rm "${TEMPDIR}/${OUTPUT}"
         elif echo "$IMAGE" | grep -qi "^postgres"; then
             # =======================================================================

@@ -14,7 +14,8 @@
 # Example: backup-docker-all '/mnt/backup' 2 > /var/log/itpbackupscript.log
 #
 # =======================================================================
-
+# START scripts
+update-scripts
 # START script
 echo "===============> BACKUP 📦 DOCKER ALL SCRIPT"
 HOSTNAME="$(hostname)"
