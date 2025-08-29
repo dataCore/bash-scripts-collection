@@ -25,6 +25,9 @@ trap 'echo -e "\n❌ Error on line $LINENO. Restore script aborted."; exit 1' ER
 PROJECTNAME=$(basename "$PWD")
 BACKUPDIR="${1:-"/mnt/backup"}/${HOSTNAME}/${PROJECTNAME}"
 DOCKERROOTDIR=$(docker info --format '{{ .DockerRootDir }}')
+TIMEOUT=60 # Waittimeout in seconds
+WAIT_INTERVAL=2 # Waitintervall in seconds
+ELAPSED=0 # Waitstart counter
 # Check backup directory
 if [ ! -d "$BACKUPDIR" ]; then
    	echo "❌ No backup directory found in: $BACKUPDIR"
@@ -109,8 +112,21 @@ elif [[ "$SELECTED" == *mariadbdump* ]]; then
   	echo "🐬 Restore MariaDB..."
   	docker compose up -d "$CONTAINERNAME"
   	CONTAINERENV_ROOTPW=$(docker compose exec "$CONTAINERNAME" sh -c 'echo "$MYSQL_ROOT_PASSWORD"')
-  	echo "Restore Databases..."
-  	gunzip -c "$SELECTED" | docker compose exec -T "$CONTAINERNAME" sh -c "mariadb -u root -p$CONTAINERENV_ROOTPW"
+	# wait for the database to be startet and do the restore
+	while true; do
+		STATUS=$(docker inspect --format='{{.State.Health.Status}}' "$CONTAINERNAME" 2>/dev/null)
+		if [ "$STATUS" == "healthy" ]; then
+			echo "Container is healthy and ready. Start restoring databases..."
+			gunzip -c "$SELECTED" | docker compose exec -T "$CONTAINERNAME" sh -c "mariadb -u root -p$CONTAINERENV_ROOTPW"
+			break
+		fi
+  		if [ "$ELAPSED" -ge "$TIMEOUT" ]; then
+    		echo "Timeout! Container is not healthy and has reached the timeout='$TIMEOUT'"
+    		exit 1
+		fi
+		sleep "$WAIT_INTERVAL"
+		ELAPSED=$((ELAPSED + WAIT_INTERVAL))
+	done
   	echo "✅ MariaDB restored"
 # =======================================================================
 # Restore MySQL
@@ -118,8 +134,21 @@ elif [[ "$SELECTED" == *mysqldump* ]]; then
   	echo "🐬 Restore MySQL..."
   	docker compose up -d "$CONTAINERNAME"
   	CONTAINERENV_ROOTPW=$(docker compose exec "$CONTAINERNAME" sh -c 'echo "$MYSQL_ROOT_PASSWORD"')
-  	echo "Restore Databases..."
-  	gunzip -c "$SELECTED" | docker compose exec -T "$CONTAINERNAME" sh -c "mysql -u root -p$CONTAINERENV_ROOTPW"
+  	# wait for the database to be startet and do the restore
+	while true; do
+		STATUS=$(docker inspect --format='{{.State.Health.Status}}' "$CONTAINERNAME" 2>/dev/null)
+		if [ "$STATUS" == "healthy" ]; then
+			echo "Container is healthy and ready. Start restoring databases..."
+			gunzip -c "$SELECTED" | docker compose exec -T "$CONTAINERNAME" sh -c "mysql -u root -p$CONTAINERENV_ROOTPW"
+			break
+		fi
+  		if [ "$ELAPSED" -ge "$TIMEOUT" ]; then
+    		echo "Timeout! Container is not healthy and has reached the timeout='$TIMEOUT'"
+    		exit 1
+		fi
+		sleep "$WAIT_INTERVAL"
+		ELAPSED=$((ELAPSED + WAIT_INTERVAL))
+	done
   	echo "✅ MySQL restored"
 # =======================================================================
 # Restore PostgreSQL
@@ -128,8 +157,21 @@ elif [[ "$SELECTED" == *postgredump* ]]; then
   	docker compose up -d "$CONTAINERNAME"
   	CONTAINERENV_DBNAME=$(docker compose exec "$CONTAINERNAME" sh -c 'echo "$POSTGRES_DB"')
   	CONTAINERENV_DBUSER=$(docker compose exec "$CONTAINERNAME" sh -c 'echo "$POSTGRES_USER"')
-  	echo "Restore Database '$CONTAINERENV_DBNAME'..."
-  	gunzip -c "$SELECTED" | docker compose exec -T "$CONTAINERNAME" psql -U "$CONTAINERENV_DBUSER" -d "$CONTAINERENV_DBNAME"
+	# wait for the database to be startet and do the restore
+	while true; do
+		STATUS=$(docker inspect --format='{{.State.Health.Status}}' "$CONTAINERNAME" 2>/dev/null)
+		if [ "$STATUS" == "healthy" ]; then
+			echo "Container is healthy and ready. Start restoring database '$CONTAINERENV_DBNAME'..."
+			gunzip -c "$SELECTED" | docker compose exec -T "$CONTAINERNAME" psql -U "$CONTAINERENV_DBUSER" -d "$CONTAINERENV_DBNAME"
+			break
+		fi
+  		if [ "$ELAPSED" -ge "$TIMEOUT" ]; then
+    		echo "Timeout! Container is not healthy and has reached the timeout='$TIMEOUT'"
+    		exit 1
+		fi
+		sleep "$WAIT_INTERVAL"
+		ELAPSED=$((ELAPSED + WAIT_INTERVAL))
+	done
   	echo "✅ PostgreSQL restored"
 # =======================================================================
 # Restore MongoDB
