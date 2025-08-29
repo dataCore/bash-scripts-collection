@@ -95,7 +95,8 @@ fi
 # =======================================================================
 echo "🔄 Restore of: $SELECTED"
 # Get ContainerName if available from the given backup name
-CONTAINERNAME=$(echo "$SELECTED" | sed -E 's/^[^_]+_[^_]+_[^_]+_([^\.]+)\..*/\1/')
+# /mnt/backup/.../.../{date}_{time}_{dockername}.{containername}.{backupname}.sql.gz
+CONTAINERNAME=$(echo "$SELECTED" | sed -n 's|.*/[0-9]\{8\}_[0-9]\{4\}_[^\.]*\.\([^\.]*\)\..*|\1|p')
 # =======================================================================
 # Restore Docker Compose
 if [[ "$SELECTED" == *.compose.tar.gz ]]; then
