@@ -1,4 +1,5 @@
 #!/bin/bash
+cd /usr/bin
 folder="/usr/bin/datacore/bash"
 
 scripts=(
