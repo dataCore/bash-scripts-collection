@@ -11,6 +11,7 @@ This repository contains a collection of useful Bash scripts for e.g. managing D
 | Script Name            | Parameters                                                                   | Description                                                                                         |
 |------------------------|------------------------------------------------------------------------------|-----------------------------------------------------------------------------------------------------|
 | `install-docker.sh`    |                                                                              | Installs Docker on a Linux system.                                                                  |
+| `install-sshkey.sh`    |                                                                              | Installs Public SSH Key for the current user                                                        |
 | `backup-docker.sh`     | {DOCKERCOMPOSE-PROJECTNAME} {BACKUPDIR:/mnt/backup/} {BACKUPDURATIONDAYS:2}  | Creates a backup of a single Docker container.                                                      |
 | `backup-docker-all.sh` | {BACKUPDIR:/mnt/backup/} {BACKUPDURATIONDAYS:2}                              | Creates backups of all running Docker containers.                                                   |
 | `restore-docker.sh`    | {BACKUPDIR:/mnt/backup/}                                                     | Restores a Docker container from a backup file.                                                     |

@@ -14,7 +14,12 @@
 # Example: backup-docker-all '/mnt/backup' 2 > /var/log/itpbackupscript.log
 #
 # =======================================================================
-# START scripts
+# Check if the script is run as root
+if [ "$EUID" -ne 0 ]; then
+  echo "Please run this script with sudo or as root."
+  exit 1
+fi
+# Update scripts
 update-scripts
 # START script
 echo "===============> BACKUP 📦 DOCKER ALL SCRIPT"
