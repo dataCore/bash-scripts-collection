@@ -4,6 +4,7 @@ folder="/usr/bin/datacore/bash"
 
 scripts=(
     "install-docker.sh:install-docker"
+    "install-sshkey.sh:install-sshkey"
     "restore-docker.sh:restore-docker"
     "update-docker.sh:update-docker"
     "update-system.sh:update-system"
