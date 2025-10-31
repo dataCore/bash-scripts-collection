@@ -33,8 +33,8 @@ export DEBIAN_FRONTEND=noninteractive
 update-scripts
 
 # Start update
-apt-get update -y
-apt-get upgrade -y
+apt update 
+apt upgrade -y
 
 # Clean up unnecessary packages and cache
 echo "Cleaning up..."
