@@ -1,6 +1,11 @@
 #!/bin/sh
-if ! git -C /usr/bin/datacore/bash/ pull; then
-    echo "ERROR: git pull failed."
+if ! git -C /usr/bin/datacore/bash fetch --all; then
+    echo "ERROR: git fetch failed."
+    exit 1
+fi
+
+if ! git -C /usr/bin/datacore/bash reset --hard origin/main; then
+    echo "ERROR: git reset failed."
     exit 1
 fi
 
