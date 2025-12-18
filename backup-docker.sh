@@ -151,10 +151,10 @@ for cont in $CONTAINERS; do
             VOLUMEDIR=${DOCKERROOTDIR}/volumes/$vol
             printf "%-100s" "  💾 LocalStorage: ${PROJECTNAME}.${VOLUMENAME}.volume.tar.gz... "
             OUTPUT=${TIMESTAMP}_${PROJECTNAME}.${VOLUMENAME}.volume.tar.gz
-            cp -r "${VOLUMEDIR}" "${TEMPDIR}"
-            tar -czf "${TEMPDIR}/${OUTPUT}" -C "${TEMPDIR}/${vol}" .
+            cp -a "${VOLUMEDIR}" "${TEMPDIR}"
+            tar -cpzf "${TEMPDIR}/${OUTPUT}" --numeric-owner -C "${TEMPDIR}/${vol}" .
             rm -r "${TEMPDIR:?}/${vol:?}"
-            cp "${TEMPDIR}/${OUTPUT}" "${PROJECTBACKUPDIR}" && rm "${TEMPDIR}/${OUTPUT}"
+            cp -p "${TEMPDIR}/${OUTPUT}" "${PROJECTBACKUPDIR}" && rm "${TEMPDIR}/${OUTPUT}"
         fi
         END=$(date +%s)
         DURATION=$((END - START))
