@@ -37,7 +37,8 @@ if ! apt-get update; then
     echo "Error: apt-get update failed."
     exit 1
 fi
-apt-get upgrade -y
+# Install upgrades and kernel updates
+apt-get dist-upgrade -y
 
 # Clean up unnecessary packages and cache
 echo "Cleaning up..."
