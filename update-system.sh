@@ -21,7 +21,7 @@ fi
 # Check for -y flag to skip confirmation
 AUTO_REBOOT=false
 for arg in "$@"; do
-    if [ "$arg" == "-y" ]; then
+    if [[ "$arg" == "-y" ]]; then
         AUTO_REBOOT=true
     fi
 done
@@ -33,12 +33,14 @@ export DEBIAN_FRONTEND=noninteractive
 update-scripts
 
 # Start update
-apt update 
-apt upgrade -y
+if ! apt-get update; then
+    echo "Error: apt-get update failed."
+    exit 1
+fi
+apt-get upgrade -y
 
 # Clean up unnecessary packages and cache
 echo "Cleaning up..."
-apt-get -f install
 apt-get autoremove -y
 apt-get autoclean -y
 apt-get clean -y
@@ -47,12 +49,12 @@ apt-get clean -y
 if [ -f /var/run/reboot-required ]; then
     if [ "$AUTO_REBOOT" = true ]; then
         echo "[✓] Auto-confirm enabled. Rebooting now..."
-        sudo reboot
+        reboot
     else
         read -r -p "System reboot is required. Do you want to reboot now? (y/n): " answer
         if [ "$answer" = "y" ] || [ "$answer" = "Y" ]; then
             echo "[✓] Rebooting now..."
-            sudo reboot
+            reboot
         else
             echo "[i] Reboot skipped. Please reboot manually later."
         fi
