@@ -21,7 +21,11 @@ export LANG="en_US.UTF-8"
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 # Error handling
 set -euo pipefail
-trap 'echo -e "\n❌ Error in Line $LINENO. Backup Script canceled."; exit 1' ERR
+cleanup() {
+    echo "🧹 Cleaning up temporary files..."
+    rm -f "${TEMPDIR}/${TIMESTAMP}_${PROJECTNAME}"* 2>/dev/null
+}
+trap 'cleanup; echo -e "\n❌ Error in Line $LINENO. Backup Script canceled."; exit 1' ERR
 if [ "$EUID" -ne 0 ]; then
     echo "❌  Run as root!"
     exit 1
