@@ -14,50 +14,31 @@
 # Example: backup-docker 'datacorecloud' '/mnt/backup' 2 > /var/log/itpbackupscript.log"
 #
 # =======================================================================
-# START script
+
 # Set the language
 export LANG="en_US.UTF-8"
-# Load the Pathes
+# Load paths
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
 # Error handling
 set -euo pipefail
+
+# --- FUNCTIONS ---
+# Cleanup function to remove the entire temp folder
 cleanup() {
-    echo "🧹 Cleaning up temporary files..."
-    rm -f "${TEMPDIR}/${TIMESTAMP}_${PROJECTNAME}"* 2>/dev/null
+    local exit_code=$?
+    # Only try to remove if TEMPDIR is defined to avoid accidents
+    if [ -n "${TEMPDIR:-}" ] && [ -d "$TEMPDIR" ]; then
+        echo "🧹 Removing temporary folder: $TEMPDIR"
+        rm -rf "$TEMPDIR"
+    fi
+    
+    if [ $exit_code -ne 0 ]; then
+        echo -e "\n❌ Error in Line $LINENO. Backup Script canceled."
+    fi
 }
-trap 'cleanup; echo -e "\n❌ Error in Line $LINENO. Backup Script canceled."; exit 1' ERR
-if [ "$EUID" -ne 0 ]; then
-    echo "❌  Run as root!"
-    exit 1
-fi
-# SET Variables
-HOSTNAME="$(hostname)"
-TIMESTAMP=$(date +"%Y%m%d_%H%M")
-BACKUPDIR="${2:-"/mnt/backup"}/${HOSTNAME}"
-if [ ! -d "$BACKUPDIR" ]; then
-    mkdir -p "$BACKUPDIR"
-fi
-TEMPDIR="/var/tmp"
-BACKUPDURATIONDAYS=${3:-2}
-DOCKERROOTDIR=$(docker info --format '{{ .DockerRootDir }}')
-# get docker-compose project name from variable or from current directory (lower case)
-PROJECTNAME=$(echo "${1:-$(basename "$PWD")}" | tr '[:upper:]' '[:lower:]')
-PROJECTBACKUPDIR="${BACKUPDIR}/${PROJECTNAME}"
-if [ ! -d "$PROJECTBACKUPDIR" ]; then
-    mkdir -p "$PROJECTBACKUPDIR"
-fi
-ALLCONTAINER=$(docker ps -q --filter "label=com.docker.compose.project=$PROJECTNAME")
-if [ -z "$ALLCONTAINER" ]; then
-    echo "⚠️ Warning: Docker-Compose Folder: ${PROJECTNAME} was not found or has no running containers. Ignore Backup!"
-    exit 2
-fi
-WORKINGDIR=$(for i in $ALLCONTAINER; do
-    docker inspect --format '{{ index .Config.Labels "com.docker.compose.project.working_dir"}}' "$i"
-done | sort -u | head -n 1)
-cd "$WORKINGDIR"
-# =======================================================================
-# PUT FUNCTIONS HERE
-# Print Status
+
+# Print Status with dynamic width
 print_status() {
     local message=$1
     local min_width=100
@@ -67,13 +48,53 @@ print_status() {
     fi
     printf "%-${width}s" "$message"
 }
-# Print Duration
+
+# Print Duration in HH:MM:SS
 print_duration() {
     local duration=$1
     printf "✅ (%02d:%02d:%02d)\n" $((duration / 3600)) $(((duration % 3600) / 60)) $((duration % 60))
 }
-# =======================================================================
-# BACKUP DOCKER COMPOSE
+
+# Trap ensures cleanup runs on EXIT (success) or ERR (failure)
+trap cleanup EXIT ERR
+
+# --- SET Variables ---
+HOSTNAME="$(hostname)"
+TIMESTAMP=$(date +"%Y%m%d_%H%M")
+PROJECTNAME=$(echo "${1:-$(basename "$PWD")}" | tr '[:upper:]' '[:lower:]')
+BACKUPDURATIONDAYS=${3:-2}
+DOCKERROOTDIR=$(docker info --format '{{ .DockerRootDir }}')
+TEMPDIR="/var/tmp/backup-docker"
+
+# Create temp dir immediately
+mkdir -p "$TEMPDIR"
+
+if [ "$EUID" -ne 0 ]; then
+    echo "❌  Run as root!"
+    exit 1
+fi
+
+# SET Backup Directory
+BACKUPDIR="${2:-"/mnt/backup"}/${HOSTNAME}"
+mkdir -p "$BACKUPDIR"
+
+PROJECTBACKUPDIR="${BACKUPDIR}/${PROJECTNAME}"
+mkdir -p "$PROJECTBACKUPDIR"
+
+# Check for running containers
+ALLCONTAINER=$(docker ps -q --filter "label=com.docker.compose.project=$PROJECTNAME")
+if [ -z "$ALLCONTAINER" ]; then
+    echo "⚠️ Warning: Project ${PROJECTNAME} not found. Skipping."
+    exit 2
+fi
+
+# Get compose working directory
+WORKINGDIR=$(for i in $ALLCONTAINER; do
+    docker inspect --format '{{ index .Config.Labels "com.docker.compose.project.working_dir"}}' "$i"
+done | sort -u | head -n 1)
+cd "$WORKINGDIR"
+
+# BACKUP DOCKER COMPOSE CONFIG
 START=$(date +%s)
 echo "Backup Docker Project: ${PROJECTNAME}"
 print_status "  📦 DockerCompose: $WORKINGDIR... "
@@ -81,19 +102,20 @@ OUTPUT=${TIMESTAMP}_${PROJECTNAME}.compose.tar.gz
 tar -czf "${TEMPDIR}/${OUTPUT}" -C "$WORKINGDIR" .
 cp "${TEMPDIR}/${OUTPUT}" "${PROJECTBACKUPDIR}" && rm "${TEMPDIR}/${OUTPUT}"
 END=$(date +%s)
-DURATION=$((END - START))
-print_duration $DURATION
+print_duration $((END - START))
+
 # =======================================================================
 # BACKUP DOCKER VOLUMES AND DATABASES
-# get all volumes of the given docker compose and ignore databases
 CONTAINERS=$(docker compose ps -q 2>/dev/null || true)
 for cont in $CONTAINERS; do
     IMAGE=$(docker inspect --format '{{.Config.Image}}' "$cont" 2>/dev/null)
     CONTAINERNAME=$(docker inspect --format '{{.Name}}' "$cont" 2>/dev/null | sed 's/^\/\(.*\)/\1/')
     VOLUMES=$(docker inspect --format '{{ range .Mounts }}{{ .Name }}{{ "\n" }}{{ end }}' "$cont" 2>/dev/null || true | grep -v '^$')
+    
     for vol in $VOLUMES; do
         START=$(date +%s)
         VOLUMENAME=${vol##*/}
+        
         if echo "$IMAGE" | grep -qi "^mariadb"; then
             # =======================================================================
             # BACKUP MariaDB
@@ -124,16 +146,16 @@ for cont in $CONTAINERS; do
             if echo "$vol" | grep -qi "config"; then
                 VOLUMEDIR=${DOCKERROOTDIR}/volumes/$vol
                 print_status "  💾 LocalStorage: ${PROJECTNAME}.${VOLUMENAME}.volume.tar.gz... "
-                cd "$VOLUMEDIR"
                 OUTPUT=${TIMESTAMP}_${PROJECTNAME}.${VOLUMENAME}.volume.tar.gz
-                tar -czf "${TEMPDIR}/${OUTPUT}" .
+                tar -czf "${TEMPDIR}/${OUTPUT}" -C "$VOLUMEDIR" .
                 cp "${TEMPDIR}/${OUTPUT}" "${PROJECTBACKUPDIR}" && rm "${TEMPDIR}/${OUTPUT}"
             else
-                print_status "  🍃 MongoDB: ${PROJECTNAME}.${CONTAINERNAME}.mongodump.sql.gz... "
+                print_status "  🍃 MongoDB: ${PROJECTNAME}.${CONTAINERNAME}.mongodump... "
                 OUTPUT=${TIMESTAMP}_${PROJECTNAME}.${CONTAINERNAME}.mongodump.sql.gz
                 docker exec "${cont}" sh -c 'mongodump --archive --gzip --quiet' >"${TEMPDIR}/${OUTPUT}"
                 cp "${TEMPDIR}/${OUTPUT}" "${PROJECTBACKUPDIR}" && rm "${TEMPDIR}/${OUTPUT}"
             fi
+
         elif echo "$IMAGE" | grep -qiE "^gitlab/gitlab"; then
             # =======================================================================
             # BACKUP Gitlab
@@ -146,30 +168,27 @@ for cont in $CONTAINERS; do
             cp "${TEMPDIR}/${OUTPUT}" "${PROJECTBACKUPDIR}" && rm "${TEMPDIR}/${OUTPUT}"
             # Cancel other volume backups for this container
             END=$(date +%s)
-            DURATION=$((END - START))
-            print_duration $DURATION
+            print_duration $((END - START))
             break
         else
             # =======================================================================
             # BACKUP as a Volume
             VOLUMEDIR=${DOCKERROOTDIR}/volumes/$vol
-            printf "%-100s" "  💾 LocalStorage: ${PROJECTNAME}.${VOLUMENAME}.volume.tar.gz... "
+            print_status "  💾 LocalStorage: ${PROJECTNAME}.${VOLUMENAME}.volume.tar.gz... "
             OUTPUT=${TIMESTAMP}_${PROJECTNAME}.${VOLUMENAME}.volume.tar.gz
-            cp -a "${VOLUMEDIR}" "${TEMPDIR}"
-            tar -cpzf "${TEMPDIR}/${OUTPUT}" --numeric-owner -C "${TEMPDIR}/${vol}" .
-            rm -r "${TEMPDIR:?}/${vol:?}"
+            # Sub-copy within the temp folder
+            cp -a "${VOLUMEDIR}" "${TEMPDIR}/vol_data"
+            tar -cpzf "${TEMPDIR}/${OUTPUT}" --numeric-owner -C "${TEMPDIR}/vol_data" .
+            rm -rf "${TEMPDIR}/vol_data"
             cp -p "${TEMPDIR}/${OUTPUT}" "${PROJECTBACKUPDIR}" && rm "${TEMPDIR}/${OUTPUT}"
         fi
         END=$(date +%s)
-        DURATION=$((END - START))
-        print_duration $DURATION
+        print_duration $((END - START))
     done
 done
 # =======================================================================
-echo "  🗑️$ Cleanup old backups (older than ${BACKUPDURATIONDAYS} days)..."
-find "$PROJECTBACKUPDIR" -name "*_$PROJECTNAME*.gz" -daystart -mtime +"$BACKUPDURATIONDAYS" | while read -r file; do
-    echo "    - Delete: $file"
-    rm "$file"
-done
-# =======================================================================
+# CLEANUP OLD BACKUPS
+echo "  🗑️ Cleanup old backups (older than ${BACKUPDURATIONDAYS} days)..."
+find "$PROJECTBACKUPDIR" -name "*_$PROJECTNAME*.gz" -daystart -mtime +"$BACKUPDURATIONDAYS" -exec echo "    - Delete: {}" \; -exec rm {} \;
+
 echo "  ✔️ All done."
