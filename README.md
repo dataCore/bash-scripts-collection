@@ -13,7 +13,7 @@ This repository contains a collection of useful Bash scripts for e.g. managing D
 | `install-docker.sh`    |                                                                              | Installs Docker on a Linux system.                                                                  |
 | `install-sshkey.sh`    |                                                                              | Installs Public SSH Key for the current user                                                        |
 | `backup-docker.sh`     | {DOCKERCOMPOSE-PROJECTNAME} {BACKUPDIR:/mnt/backup/} {BACKUPDURATIONDAYS:2}  | Creates a backup of a single Docker container.                                                      |
-| `backup-docker-all.sh` | {BACKUPDIR:/mnt/backup/} {BACKUPDURATIONDAYS:2}                              | Creates backups of all running Docker containers.                                                   |
+| `backup-docker-all.sh` | {BACKUPDIR:/mnt/backup/} {BACKUPDURATIONDAYS:2} {PROXMOXBACKUP}              | Creates backups of all running Docker containers and optionaly upload it to PBS                     |
 | `restore-docker.sh`    | {BACKUPDIR:/mnt/backup/}                                                     | Restores a Docker container from a backup file.                                                     |
 | `update-docker.sh`     | {DOCKERCOMPOSE-PROJECTNAME} --auto={y,n,b}                                   | Updates a single Docker container. Autorestart = yes, no, with backup                               |
 | `update-docker-all.sh` |                                                                              | Updates all Docker containers with --auto=y                                                         |
@@ -35,6 +35,8 @@ This repository contains a collection of useful Bash scripts for e.g. managing D
 To automate the scripts, you can use 'crontab -e' to backup e.g. each day at 03:23 and update the system and all docker-compose each wednesday at 05:03
 
 ```bash
+PBS_PASSWORD="YourLXCPassword"
+PBS_FINGERPRINT="Your:LXC:Fingerprint"
 # m h  dom mon dow   command
 23 03 * * * backup-docker-all '/mnt/backup' 0 > /var/log/dataCoreBackupScript.log
 23 05 * * 03 update-system -y > /var/log/dataCoreUpdateScript.log

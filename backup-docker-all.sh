@@ -10,8 +10,8 @@
 # 2024-04-15 Initial Version
 # 2025-07-14 Redesign with generic backup scripts
 #
-# Usage: backup-docker-all {BACKUPDIR} {BACKUPDURATIONDAYS}
-# Example: backup-docker-all '/mnt/backup' 2 > /var/log/itpbackupscript.log
+# Usage: backup-docker-all {BACKUPDIR} {BACKUPDURATIONDAYS} {PROXMOXBACKUP}
+# Example: backup-docker-all '/mnt/backup' 2 'root@pam@192.168.1.100:Backup-HDD' > /var/log/itpbackupscript.log
 #
 # =======================================================================
 # Check if the script is run as root
@@ -51,5 +51,28 @@ for PROJECTNAME in $ALLPROJECTS; do
 done
 TIMESTAMP=$(date +"%Y%m%d_%H%M")
 echo "$TIMESTAMP Backup for all Docker Compose Projects completed"
+# =======================================================================
+# OPTIONAL: UPLOAD TO PROXMOX BACKUP SERVER
+# Check if PBS_REPOSITORY is provided as 4th argument
+PBS_REPO="${4:-}"
+
+if [ -n "$PBS_REPO" ]; then
+    START_PBS=$(date +%s)
+    print_status "  🚀 Uploading to PBS: $HOSTNAME (All Projects)... "
+    
+    # nano ~/.bashrc
+    # export PBS_PASSWORD="Dein_LXC_Passwort"
+    # export PBS_FINGERPRINT="Dein:LXC:Fingerprint:von:vorhin"
+    # source ~/.bashrc
+
+    # Archiv: hostname.pxar
+    proxmox-backup-client backup \
+        "${HOSTNAME}.pxar:${BACKUPDIR}" \
+        --repository "$PBS_REPO" \
+        --quiet
+    
+    END_PBS=$(date +%s)
+    print_duration $((END_PBS - START_PBS))
+fi
 # =======================================================================
 echo "===============> End of backup-docker-all SCRIPT for: '${HOSTNAME}' "
