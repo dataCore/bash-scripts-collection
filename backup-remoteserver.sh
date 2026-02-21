@@ -38,10 +38,10 @@ REMOTE_PATH=$2
 USER=${REMOTE_USER:-"sa_backup"}
 
 echo "-"
-echo " ^=^s^e Date:   $(date '+%Y-%m-%d %H:%M:%S')"
-echo " ^=^z^` Target: $REMOTE_IP"
-echo " ^=^s^b Path:   $REMOTE_PATH"
-echo " ^=^w^d  ^o Store:  $PBS_DATASTORE"
+echo "Date:   $(date '+%Y-%m-%d %H:%M:%S')"
+echo "Target: $REMOTE_IP"
+echo "Path:   $REMOTE_PATH"
+echo "Store:  $PBS_DATASTORE"
 echo "-"
 
 # --- EXECUTE REMOTE BACKUP ---
