@@ -11,6 +11,7 @@ scripts=(
     "update-scripts.sh:update-scripts"
     "backup-docker.sh:backup-docker"
     "backup-docker-all.sh:backup-docker-all"
+    "backup-remoteserver.sh:backup-remoteserver"
     "update-docker-all.sh:update-docker-all"
     "show-lastreboot.sh:show-lastreboot"
     "wol.sh:wol"
