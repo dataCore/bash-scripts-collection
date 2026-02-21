@@ -22,7 +22,7 @@ CONFIG_FILE="/etc/backup-remoteserver.conf"
 if [ -f "$CONFIG_FILE" ]; then
     source "$CONFIG_FILE"
 else
-    echo " ^}^l ERROR: Configuration file $CONFIG_FILE not found!"
+    echo "ERROR: Configuration file $CONFIG_FILE not found!"
     exit 1
 fi
 
@@ -54,11 +54,11 @@ ssh -o BatchMode=yes -o ConnectTimeout=10 -R 8007:127.0.0.1:8007 $USER@$REMOTE_I
 # --- ERROR HANDLING ---
 if [ $? -eq 0 ]; then
     echo "-"
-    echo " ^|^e SUCCESS: Backup of $REMOTE_IP completed."
+    echo "SUCCESS: Backup of $REMOTE_IP completed."
     echo "-"
 else
     echo "-"
-    echo " ^}^l ERROR: Backup failed!"
+    echo "ERROR: Backup failed!"
     echo "-"
     exit 1
 fi
