@@ -1,4 +1,5 @@
 #!/bin/bash
+
 # =======================================================================
 # UPDATE SYSTEM SCRIPT to update the Linux System automaticly
 # by dataCore
@@ -8,14 +9,16 @@
 #
 # HISTORY
 # 2024-04-15 Initial Version
+# 2026-05-01 Fix reboot detection (kernel version check via dpkg)
 #
 # =======================================================================
 # START script
 # =======================================================================
+
 # Check if the script is run as root
 if [ "$EUID" -ne 0 ]; then
-  echo "Please run this script with sudo or as root."
-  exit 1
+    echo "Please run this script with sudo or as root."
+    exit 1
 fi
 
 # Check for -y flag to skip confirmation
@@ -37,6 +40,7 @@ if ! apt-get update; then
     echo "Error: apt-get update failed."
     exit 1
 fi
+
 # Install upgrades and kernel updates
 apt-get dist-upgrade -y
 
@@ -47,17 +51,32 @@ apt-get autoclean -y
 apt-get clean -y
 
 # Check if a reboot is required
+REBOOT_NEEDED=false
+
+# Standard Debian check
 if [ -f /var/run/reboot-required ]; then
+    REBOOT_NEEDED=true
+fi
+
+# Kernel version check (works on Debian and Proxmox)
+RUNNING_KERNEL="$(uname -r)"
+NEWEST_KERNEL="$(dpkg -l 'linux-image-*' | grep '^ii' | awk '{print $2}' \
+    | sed 's/linux-image-//' | sort -V | tail -1)"
+if [ -n "$NEWEST_KERNEL" ] && [ "$RUNNING_KERNEL" != "$NEWEST_KERNEL" ]; then
+    REBOOT_NEEDED=true
+fi
+
+if [ "$REBOOT_NEEDED" = true ]; then
     if [ "$AUTO_REBOOT" = true ]; then
         echo "[✓] Auto-confirm enabled. Rebooting now..."
         reboot
     else
-        read -r -p "System reboot is required. Do you want to reboot now? (y/n): " answer
+        read -r -p "Reboot required (new kernel: $NEWEST_KERNEL). Reboot now? (y/n): " answer
         if [ "$answer" = "y" ] || [ "$answer" = "Y" ]; then
             echo "[✓] Rebooting now..."
             reboot
         else
-            echo "[i] Reboot skipped. Please reboot manually later."
+            echo "[i] Reboot skipped. Running: $RUNNING_KERNEL → Newest: $NEWEST_KERNEL"
         fi
     fi
 fi
