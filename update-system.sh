@@ -51,15 +51,7 @@ apt-get autoclean -y
 apt-get clean -y
 
 # Check if a reboot is required
-REBOOT_NEEDED=false
-
-# Standard Debian check
-if [ -f /var/run/reboot-required ]; then
-    REBOOT_NEEDED=true
-fi
-
-# Kernel version check — works on Debian (linux-image-*) and Proxmox (proxmox-kernel-*-pve-signed)
-RUNNING_KERNEL="$(uname -r)"
+# Supports Debian (linux-image-*) and Proxmox (proxmox-kernel-*-pve-signed)
 NEWEST_KERNEL="$(dpkg -l | grep '^ii' | awk '{print $2}' \
     | grep -E '^(linux-image|proxmox-kernel)-[0-9]' \
     | grep -v 'proxmox-kernel-helper' \
@@ -67,24 +59,18 @@ NEWEST_KERNEL="$(dpkg -l | grep '^ii' | awk '{print $2}' \
     | sed -E 's/(-pve-signed|-pve)$//' \
     | sort -V | tail -1)"
 
-# Normalize running kernel for comparison (strip trailing -pve)
-RUNNING_KERNEL_NORM="$(echo "$RUNNING_KERNEL" | sed -E 's/-pve$//')"
-
-if [ -n "$NEWEST_KERNEL" ] && [ "$RUNNING_KERNEL_NORM" != "$NEWEST_KERNEL" ]; then
-    REBOOT_NEEDED=true
-fi
-
-if [ "$REBOOT_NEEDED" = true ]; then
+if [ -f /var/run/reboot-required ] || \
+   { [ -n "$NEWEST_KERNEL" ] && [ "$(uname -r | sed -E 's/-pve$//')" != "$NEWEST_KERNEL" ]; }; then
     if [ "$AUTO_REBOOT" = true ]; then
         echo "[✓] Auto-confirm enabled. Rebooting now..."
         reboot
     else
-        read -r -p "Reboot required (running: $RUNNING_KERNEL → newest: $NEWEST_KERNEL). Reboot now? (y/n): " answer
+        read -r -p "Reboot required (running: $(uname -r) → newest: $NEWEST_KERNEL). Reboot now? (y/n): " answer
         if [ "$answer" = "y" ] || [ "$answer" = "Y" ]; then
             echo "[✓] Rebooting now..."
             reboot
         else
-            echo "[i] Reboot skipped. Running: $RUNNING_KERNEL → Newest: $NEWEST_KERNEL"
+            echo "[i] Reboot skipped. Running: $(uname -r) → Newest: $NEWEST_KERNEL"
         fi
     fi
 fi
