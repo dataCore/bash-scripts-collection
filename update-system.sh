@@ -9,7 +9,7 @@
 #
 # HISTORY
 # 2024-04-15 Initial Version
-# 2026-05-01 Fix reboot detection (kernel version check via dpkg)
+# 2026-05-01 Fix reboot detection for Proxmox (proxmox-kernel-* package names)
 #
 # =======================================================================
 # START script
@@ -58,11 +58,19 @@ if [ -f /var/run/reboot-required ]; then
     REBOOT_NEEDED=true
 fi
 
-# Kernel version check (works on Debian and Proxmox)
+# Kernel version check — works on Debian (linux-image-*) and Proxmox (proxmox-kernel-*-pve-signed)
 RUNNING_KERNEL="$(uname -r)"
-NEWEST_KERNEL="$(dpkg -l 'linux-image-*' | grep '^ii' | awk '{print $2}' \
-    | sed 's/linux-image-//' | sort -V | tail -1)"
-if [ -n "$NEWEST_KERNEL" ] && [ "$RUNNING_KERNEL" != "$NEWEST_KERNEL" ]; then
+NEWEST_KERNEL="$(dpkg -l | grep '^ii' | awk '{print $2}' \
+    | grep -E '^(linux-image|proxmox-kernel)-[0-9]' \
+    | grep -v 'proxmox-kernel-helper' \
+    | sed -E 's/^(linux-image|proxmox-kernel)-//' \
+    | sed -E 's/(-pve-signed|-pve)$//' \
+    | sort -V | tail -1)"
+
+# Normalize running kernel for comparison (strip trailing -pve)
+RUNNING_KERNEL_NORM="$(echo "$RUNNING_KERNEL" | sed -E 's/-pve$//')"
+
+if [ -n "$NEWEST_KERNEL" ] && [ "$RUNNING_KERNEL_NORM" != "$NEWEST_KERNEL" ]; then
     REBOOT_NEEDED=true
 fi
 
@@ -71,7 +79,7 @@ if [ "$REBOOT_NEEDED" = true ]; then
         echo "[✓] Auto-confirm enabled. Rebooting now..."
         reboot
     else
-        read -r -p "Reboot required (new kernel: $NEWEST_KERNEL). Reboot now? (y/n): " answer
+        read -r -p "Reboot required (running: $RUNNING_KERNEL → newest: $NEWEST_KERNEL). Reboot now? (y/n): " answer
         if [ "$answer" = "y" ] || [ "$answer" = "Y" ]; then
             echo "[✓] Rebooting now..."
             reboot
