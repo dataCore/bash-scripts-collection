@@ -3,17 +3,18 @@ cd /usr/bin
 folder="/usr/bin/datacore/bash"
 
 scripts=(
-    "install-docker.sh:install-docker"
-    "install-sshkey.sh:install-sshkey"
-    "restore-docker.sh:restore-docker"
-    "update-docker.sh:update-docker"
-    "update-system.sh:update-system"
-    "update-scripts.sh:update-scripts"
     "backup-docker.sh:backup-docker"
     "backup-docker-all.sh:backup-docker-all"
     "backup-remoteserver.sh:backup-remoteserver"
-    "update-docker-all.sh:update-docker-all"
+    "install-docker.sh:install-docker"
+    "install-ssh.sh:install-ssh"
+    "install-sshkey.sh:install-sshkey"
+    "restore-docker.sh:restore-docker"
     "show-lastreboot.sh:show-lastreboot"
+    "update-docker.sh:update-docker"
+    "update-docker-all.sh:update-docker-all"
+    "update-scripts.sh:update-scripts"
+    "update-system.sh:update-system"
     "wol.sh:wol"
 )
 
