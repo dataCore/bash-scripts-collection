@@ -36,8 +36,9 @@ FAIL2BAN_JAIL="/etc/fail2ban/jail.d/datacore-ssh.conf"
 FAIL2BAN_BANTIME="10m"   # overridden by --bantime parameter
 LOG_FILE="/var/log/datacore-install.log"
 
-# Directory containing <username>.pub files — same location as this script
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Resolve symlinks so pubkeys/ is found relative to the real script location,
+# not the symlink created by link.sh (e.g. /usr/bin/install-ssh → real path)
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 PUBKEYS_DIR="${SCRIPT_DIR}/pubkeys"
 
 # =============================================================================
