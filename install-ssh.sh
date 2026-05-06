@@ -10,12 +10,14 @@
 #   <script-dir>/pubkeys/<username>.pub
 #
 # What this script does:
-#   1. Install openssh-server + figlet (if missing)
-#   2. Create group 'ssh-users' and add <username>
-#   3. Generate SSH banner via figlet
-#   4. Configure fail2ban for SSH (5 attempts → bantime)
-#   5. Harden sshd_config (AllowGroups, key-only, no root, etc.)
-#   6. Install pubkeys/<username>.pub as authorized_keys for <username>
+#   1. Set timezone to Europe/Zurich
+#   2. Install openssh-server + figlet + sudo (if missing)
+#   3. Create group 'ssh-users' and add <username>
+#   4. Grant <username> passwordless sudo via /etc/sudoers.d/
+#   5. Generate SSH banner via figlet
+#   6. Configure fail2ban for SSH (5 attempts → bantime)
+#   7. Harden sshd_config (AllowGroups, key-only, no root, etc.)
+#   8. Install pubkeys/<username>.pub as authorized_keys for <username>
 #
 # Repository: https://code.geek.ch/dataCore/bash-scripts-collection
 # =============================================================================
@@ -35,6 +37,8 @@ SSHD_BANNER_FILE="/etc/ssh/sshd_banner"
 FAIL2BAN_JAIL="/etc/fail2ban/jail.d/datacore-ssh.conf"
 FAIL2BAN_BANTIME="10m"   # overridden by --bantime parameter
 LOG_FILE="/var/log/datacore-install.log"
+TIMEZONE="Europe/Zurich"
+SUDOERS_DIR="/etc/sudoers.d"
 
 # Resolve symlinks so pubkeys/ is found relative to the real script location,
 # not the symlink created by link.sh (e.g. /usr/bin/install-ssh → real path)
@@ -124,6 +128,27 @@ check_username() {
 }
 
 # =============================================================================
+# Step 0 — Timezone
+# =============================================================================
+
+step_set_timezone() {
+    print_section "Timezone"
+
+    # systemd-logind must be running for timedatectl to work
+    systemctl start systemd-logind 2>/dev/null || true
+
+    local current
+    current=$(timedatectl show --property=Timezone --value 2>/dev/null || cat /etc/timezone 2>/dev/null || echo "unknown")
+
+    if [[ "$current" == "$TIMEZONE" ]]; then
+        ok "Timezone already set to ${TIMEZONE}"
+    else
+        timedatectl set-timezone "$TIMEZONE"
+        ok "Timezone set: ${current} → ${TIMEZONE}"
+    fi
+}
+
+# =============================================================================
 # Step 1 — Install Packages
 # =============================================================================
 
@@ -137,6 +162,13 @@ step_install_packages() {
         info "openssh-server not found — will install"
     else
         ok "openssh-server already installed"
+    fi
+
+    if ! command -v sudo &>/dev/null; then
+        packages+=(sudo)
+        info "sudo not found — will install"
+    else
+        ok "sudo already installed"
     fi
 
     if ! command -v figlet &>/dev/null; then
@@ -189,6 +221,34 @@ step_setup_group() {
 
     info "Current members of '${SSH_GROUP}':"
     echo -e "     ${CYAN}$(getent group "$SSH_GROUP" | cut -d: -f4)${NC}"
+}
+
+# =============================================================================
+# Step 2b — Passwordless Sudo
+# =============================================================================
+
+step_setup_sudo() {
+    print_section "Sudo Configuration"
+
+    local sudoers_file="${SUDOERS_DIR}/10-${TARGET_USER}"
+
+    # Validate sudoers.d exists (it should after sudo install)
+    mkdir -p "$SUDOERS_DIR"
+    chmod 750 "$SUDOERS_DIR"
+
+    # Write sudoers drop-in
+    echo "${TARGET_USER} ALL=(ALL) NOPASSWD:ALL" > "${sudoers_file}.tmp"
+
+    # Validate with visudo before putting it in place
+    if visudo -c -f "${sudoers_file}.tmp" &>/dev/null; then
+        mv "${sudoers_file}.tmp" "$sudoers_file"
+        chmod 440 "$sudoers_file"
+        ok "Sudoers entry created: ${sudoers_file}"
+        ok "${TARGET_USER} ALL=(ALL) NOPASSWD:ALL"
+    else
+        rm -f "${sudoers_file}.tmp"
+        die "visudo validation failed — sudoers file not written"
+    fi
 }
 
 # =============================================================================
@@ -361,20 +421,39 @@ step_install_authorized_keys() {
 
     local ssh_dir="${TARGET_HOME}/.ssh"
     local auth_keys="${ssh_dir}/authorized_keys"
+    local added=0 skipped=0
 
     mkdir -p "$ssh_dir"
     chmod 700 "$ssh_dir"
     chown "${TARGET_USER}:${TARGET_USER}" "$ssh_dir"
-
-    # Append keys from pubkeys/<username>.pub, deduplicate
-    cat "$PUBKEY_FILE" >> "$auth_keys"
-    sort -u "$auth_keys" -o "$auth_keys"
+    touch "$auth_keys"
     chmod 600 "$auth_keys"
     chown "${TARGET_USER}:${TARGET_USER}" "$auth_keys"
 
-    local key_count
-    key_count=$(grep -c '^ssh-' "$auth_keys" 2>/dev/null || echo 0)
-    ok "Keys installed for '${TARGET_USER}': ${key_count} key(s) → ${auth_keys}"
+    # Add each key only if its key material is not already present.
+    # Comparison is on the key blob (field 2) only — ignores comment differences.
+    while IFS= read -r line; do
+        # Skip blank lines and comments
+        [[ -z "$line" || "$line" == \#* ]] && continue
+
+        local key_blob
+        key_blob=$(awk '{print $2}' <<< "$line")
+
+        if grep -qF "$key_blob" "$auth_keys" 2>/dev/null; then
+            info "Already present, skipping: ${line##* }"   # show comment/label
+            (( skipped++ )) || true
+        else
+            echo "$line" >> "$auth_keys"
+            ok "Added key: ${line##* }"
+            (( added++ )) || true
+        fi
+    done < "$PUBKEY_FILE"
+
+    local total
+    total=$(grep -c '^ssh-' "$auth_keys" 2>/dev/null || echo 0)
+
+    echo ""
+    info "Result: ${added} added, ${skipped} already present, ${total} total → ${auth_keys}"
     info "Source: ${PUBKEY_FILE}"
 
     # Note: no authorized_keys for root.
@@ -393,7 +472,9 @@ step_summary() {
     echo ""
 
     printf "  ${BOLD}%-28s${NC} %s\n" "Target user:"         "${TARGET_USER}"
+    printf "  ${BOLD}%-28s${NC} %s\n" "Timezone:"            "${TIMEZONE}"
     printf "  ${BOLD}%-28s${NC} %s\n" "SSH group:"           "${SSH_GROUP}"
+    printf "  ${BOLD}%-28s${NC} %s\n" "Sudo:"                "${SUDOERS_DIR}/10-${TARGET_USER}  (NOPASSWD:ALL)"
     printf "  ${BOLD}%-28s${NC} %s\n" "Fail2ban ban:"        "5 attempts → ${FAIL2BAN_BANTIME}"
     printf "  ${BOLD}%-28s${NC} %s\n" "Banner:"              "${SSHD_BANNER_FILE}"
     printf "  ${BOLD}%-28s${NC} %s\n" "Hardened config:"     "${SSHD_HARDENED_DROP}"
@@ -425,8 +506,10 @@ main() {
     print_header
     check_username "$@"
 
+    step_set_timezone
     step_install_packages
     step_setup_group
+    step_setup_sudo
     step_create_banner
     step_configure_fail2ban
     step_harden_sshd
