@@ -95,29 +95,14 @@ step_install_zabbix() {
 
     if command -v zabbix_agent2 &>/dev/null; then
         ok "zabbix-agent2 already installed: $(zabbix_agent2 --version 2>/dev/null | head -1)"
-        info "Ensuring package is up to date..."
-        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq zabbix-agent2
         return
     fi
 
-    # Detect Debian version
-    local debian_version
-    debian_version=$(grep VERSION_ID /etc/os-release | cut -d= -f2 | tr -d '"')
-
-    info "Detected Debian ${debian_version}"
-    info "Adding Zabbix 7.2 repository..."
-
-    # Download and install Zabbix repo package
-    local zabbix_pkg="zabbix-release_7.2-1+debian${debian_version}_all.deb"
-    local zabbix_url="https://repo.zabbix.com/zabbix/7.2/release/debian/pool/main/z/zabbix-release/${zabbix_pkg}"
-
-    curl -fsSL "$zabbix_url" -o "/tmp/${zabbix_pkg}"
-    dpkg -i "/tmp/${zabbix_pkg}" &>/dev/null
-    rm -f "/tmp/${zabbix_pkg}"
-    ok "Zabbix repository added"
-
     apt-get update -qq
-    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq zabbix-agent2
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+        zabbix-agent2 \
+        zabbix-agent2-plugin-\*
+
     ok "Installed: $(zabbix_agent2 --version 2>/dev/null | head -1)"
 }
 
