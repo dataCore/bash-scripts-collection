@@ -258,24 +258,68 @@ step_setup_sudo() {
 step_create_banner() {
     print_section "SSH Login Banner"
 
-    local hostname
-    hostname=$(hostname -s)
+    local banner_script="/usr/local/sbin/update-ssh-banner"
 
-    info "Generating banner for: ${BOLD}${hostname}${NC}"
+    # --- Write the banner generator script ---
+    cat > "$banner_script" <<'BANNERSCRIPT'
+#!/usr/bin/env bash
+# Regenerated on every boot via systemd unit: update-ssh-banner.service
+BANNER_FILE="/etc/ssh/sshd_banner"
+OWNER="TARGET_USER_PLACEHOLDER"
 
-    {
-        echo ""
-        figlet -w 500 -t "$hostname" 2>/dev/null || echo "  $hostname"
-        echo ""
-        echo "  ${TARGET_USER} Infrastructure — Authorized Access Only"
-        echo "  All connections are logged and monitored."
-        echo "  Unauthorized access is strictly prohibited."
-        echo ""
-        printf "  OS: "; cat /etc/os-release 2>/dev/null | grep PRETTY_NAME | cut -d= -f2 | tr -d '"' || echo "Debian"
-        printf "  Host: %s\n" "$(hostname -f 2>/dev/null || hostname)"
-        echo ""
-    } > "$SSHD_BANNER_FILE"
+# Hostname
+hostname=$(hostname -s)
 
+# Primary IP: first non-loopback IPv4 address (ens18, eth0, etc.)
+primary_ip=$(ip -4 addr show scope global up \
+    | awk '/inet / {print $2}' \
+    | head -1 | cut -d/ -f1)
+[[ -z "$primary_ip" ]] && primary_ip="(no IP yet)"
+
+# OS
+os=$(grep PRETTY_NAME /etc/os-release 2>/dev/null | cut -d= -f2 | tr -d '"')
+
+{
+    echo ""
+    figlet -w 500 -t "$hostname" 2>/dev/null || echo "  $hostname"
+    echo ""
+    echo "  ${OWNER} Infrastructure — Authorized Access Only"
+    echo "  All connections are logged and monitored."
+    echo "  Unauthorized access is strictly prohibited."
+    echo ""
+    printf "  OS:   %s\n" "$os"
+    printf "  Host: %s\n" "$(hostname -f 2>/dev/null || hostname)"
+    printf "  IP:   %s\n" "$primary_ip"
+    echo ""
+} > "$BANNER_FILE"
+BANNERSCRIPT
+
+    # Substitute the actual username into the script
+    sed -i "s/TARGET_USER_PLACEHOLDER/${TARGET_USER}/" "$banner_script"
+    chmod 750 "$banner_script"
+
+    # --- systemd unit: runs after network is up, on every boot ---
+    cat > /etc/systemd/system/update-ssh-banner.service <<EOF
+[Unit]
+Description=Regenerate SSH login banner (hostname + IP)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=${banner_script}
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    systemctl daemon-reload
+    systemctl enable --quiet update-ssh-banner.service
+    ok "systemd unit installed: update-ssh-banner.service (runs on every boot)"
+
+    # Run it now to generate the initial banner
+    bash "$banner_script"
     ok "Banner written to ${SSHD_BANNER_FILE}"
     echo ""
     echo -e "${BLUE}  Preview:${NC}"
@@ -476,7 +520,8 @@ step_summary() {
     printf "  ${BOLD}%-28s${NC} %s\n" "SSH group:"           "${SSH_GROUP}"
     printf "  ${BOLD}%-28s${NC} %s\n" "Sudo:"                "${SUDOERS_DIR}/10-${TARGET_USER}  (NOPASSWD:ALL)"
     printf "  ${BOLD}%-28s${NC} %s\n" "Fail2ban ban:"        "5 attempts → ${FAIL2BAN_BANTIME}"
-    printf "  ${BOLD}%-28s${NC} %s\n" "Banner:"              "${SSHD_BANNER_FILE}"
+    printf "  ${BOLD}%-28s${NC} %s\n" "Banner:"              "${SSHD_BANNER_FILE}  (auto-updated on boot)"
+    printf "  ${BOLD}%-28s${NC} %s\n" "Banner script:"       "/usr/local/sbin/update-ssh-banner"
     printf "  ${BOLD}%-28s${NC} %s\n" "Hardened config:"     "${SSHD_HARDENED_DROP}"
     printf "  ${BOLD}%-28s${NC} %s\n" "Fail2ban jail:"       "${FAIL2BAN_JAIL}"
     printf "  ${BOLD}%-28s${NC} %s\n" "Pubkey source:"       "${PUBKEY_FILE}"
