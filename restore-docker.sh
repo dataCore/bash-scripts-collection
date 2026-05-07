@@ -214,38 +214,41 @@ echo "🔄 Restoring: $(basename "$SELECTED")"
 
 # Extract the container name from the backup filename:
 # Pattern: {date}_{time}_{project}.{containername}.{backuptype}.ext
+# compose.tar.gz has no containername segment → CONTAINERNAME will be empty, that is fine.
 CONTAINERNAME=$(basename "$SELECTED" | sed -n 's/^[0-9]*_[0-9]*_[^.]*\.\([^.]*\)\..*/\1/p')
 
 # Resolve the compose SERVICE name from the container name.
-# docker compose up/exec/ps require the service name, not container_name.
+# Not needed for compose.tar.gz restores – skip resolution in that case.
 # Strategy 1: container already exists (stopped) → read label directly
 # Strategy 2: parse docker compose config → match container_name to service
 # Strategy 3: fall back to using container name as-is (simple projects)
 SERVICENAME=""
-if [ -n "$CONTAINERNAME" ]; then
-    SERVICENAME=$(docker ps -a \
-        --filter "name=^/${CONTAINERNAME}$" \
-        --format '{{.Label "com.docker.compose.service"}}' 2>/dev/null | head -n1 || true)
+if [[ "$SELECTED" != *.compose.tar.gz ]]; then
+    if [ -n "$CONTAINERNAME" ]; then
+        SERVICENAME=$(docker ps -a \
+            --filter "name=^/${CONTAINERNAME}$" \
+            --format '{{.Label "com.docker.compose.service"}}' 2>/dev/null | head -n1 || true)
 
-    if [ -z "$SERVICENAME" ]; then
-        SERVICENAME=$(docker compose config 2>/dev/null | awk -v cn="$CONTAINERNAME" '
-            /^services:/ { in_svc=1; next }
-            in_svc && /^  [a-zA-Z]/ { cur=$1; gsub(/:$/,"",cur) }
-            in_svc && /container_name:/ { gsub(/[[:space:]]/,"",$2); if ($2==cn) { print cur; exit } }
-        ')
+        if [ -z "$SERVICENAME" ]; then
+            SERVICENAME=$(docker compose config 2>/dev/null | awk -v cn="$CONTAINERNAME" '
+                /^services:/ { in_svc=1; next }
+                in_svc && /^  [a-zA-Z]/ { cur=$1; gsub(/:$/,"",cur) }
+                in_svc && /container_name:/ { gsub(/[[:space:]]/,"",$2); if ($2==cn) { print cur; exit } }
+            ')
+        fi
+
+        if [ -z "$SERVICENAME" ]; then
+            SERVICENAME="$CONTAINERNAME"
+            echo "⚠️  Could not resolve service name for '${CONTAINERNAME}', using as-is."
+        fi
     fi
 
     if [ -z "$SERVICENAME" ]; then
-        SERVICENAME="$CONTAINERNAME"
-        echo "⚠️  Could not resolve service name for '${CONTAINERNAME}', using as-is."
+        echo "❌ Could not determine compose service name from backup filename."
+        exit 1
     fi
+    [ "$SERVICENAME" != "$CONTAINERNAME" ] && echo "ℹ️  Container '${CONTAINERNAME}' → Service '${SERVICENAME}'"
 fi
-
-if [ -z "$SERVICENAME" ]; then
-    echo "❌ Could not determine compose service name from backup filename."
-    exit 1
-fi
-[ "$SERVICENAME" != "$CONTAINERNAME" ] && echo "ℹ️  Container '${CONTAINERNAME}' → Service '${SERVICENAME}'"
 
 # =======================================================================
 # RESTORE DOCKER COMPOSE CONFIG
