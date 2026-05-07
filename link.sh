@@ -9,7 +9,6 @@ scripts=(
     "install-docker.sh:install-docker"
 	"install-mon.sh:install-mon"
     "install-ssh.sh:install-ssh"
-    "install-sshkey.sh:install-sshkey"
     "restore-docker.sh:restore-docker"
     "show-lastreboot.sh:show-lastreboot"
     "update-docker.sh:update-docker"

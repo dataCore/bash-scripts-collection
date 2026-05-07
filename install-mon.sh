@@ -105,7 +105,7 @@ step_install_zabbix() {
     debian_version=$(grep VERSION_ID /etc/os-release | cut -d= -f2 | tr -d '"')
 
     info "Detected Debian ${debian_version}"
-    info "Adding Zabbix ${ZABBIX_VERSION} repository..."
+    info "Adding Zabbix 7.2 repository..."
 
     # Download and install Zabbix repo package
     local zabbix_pkg="zabbix-release_7.2-1+debian${debian_version}_all.deb"
