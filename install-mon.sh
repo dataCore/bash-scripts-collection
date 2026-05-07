@@ -99,10 +99,7 @@ step_install_zabbix() {
     fi
 
     apt-get update -qq
-    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-        zabbix-agent2 \
-        zabbix-agent2-plugin-\*
-
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq zabbix-agent2
     ok "Installed: $(zabbix_agent2 --version 2>/dev/null | head -1)"
 }
 
