@@ -212,9 +212,40 @@ fi
 echo ""
 echo "🔄 Restoring: $(basename "$SELECTED")"
 
-# Extract the compose service name from the backup filename:
-# Pattern: {date}_{time}_{project}.{servicename}.{backuptype}.ext
+# Extract the container name from the backup filename:
+# Pattern: {date}_{time}_{project}.{containername}.{backuptype}.ext
 CONTAINERNAME=$(basename "$SELECTED" | sed -n 's/^[0-9]*_[0-9]*_[^.]*\.\([^.]*\)\..*/\1/p')
+
+# Resolve the compose SERVICE name from the container name.
+# docker compose up/exec/ps require the service name, not container_name.
+# Strategy 1: container already exists (stopped) → read label directly
+# Strategy 2: parse docker compose config → match container_name to service
+# Strategy 3: fall back to using container name as-is (simple projects)
+SERVICENAME=""
+if [ -n "$CONTAINERNAME" ]; then
+    SERVICENAME=$(docker ps -a \
+        --filter "name=^/${CONTAINERNAME}$" \
+        --format '{{.Label "com.docker.compose.service"}}' 2>/dev/null | head -n1 || true)
+
+    if [ -z "$SERVICENAME" ]; then
+        SERVICENAME=$(docker compose config 2>/dev/null | awk -v cn="$CONTAINERNAME" '
+            /^services:/ { in_svc=1; next }
+            in_svc && /^  [a-zA-Z]/ { cur=$1; gsub(/:$/,"",cur) }
+            in_svc && /container_name:/ { gsub(/[[:space:]]/,"",$2); if ($2==cn) { print cur; exit } }
+        ')
+    fi
+
+    if [ -z "$SERVICENAME" ]; then
+        SERVICENAME="$CONTAINERNAME"
+        echo "⚠️  Could not resolve service name for '${CONTAINERNAME}', using as-is."
+    fi
+fi
+
+if [ -z "$SERVICENAME" ]; then
+    echo "❌ Could not determine compose service name from backup filename."
+    exit 1
+fi
+[ "$SERVICENAME" != "$CONTAINERNAME" ] && echo "ℹ️  Container '${CONTAINERNAME}' → Service '${SERVICENAME}'"
 
 # =======================================================================
 # RESTORE DOCKER COMPOSE CONFIG
@@ -227,11 +258,11 @@ if [[ "$SELECTED" == *.compose.tar.gz ]]; then
 # RESTORE MariaDB
 elif [[ "$SELECTED" == *.mariadbdump.sql.gz ]]; then
     echo "🐬 Restoring MariaDB..."
-    docker compose up -d "$CONTAINERNAME"
-    wait_healthy "$CONTAINERNAME" mariadb
+    docker compose up -d "$SERVICENAME"
+    wait_healthy "$SERVICENAME" mariadb
     # Pass password via MYSQL_PWD env var inside the container – avoids
     # trailing-newline issues from $() and special-char quoting problems.
-    gunzip -c "$SELECTED" | docker compose exec -T "$CONTAINERNAME" \
+    gunzip -c "$SELECTED" | docker compose exec -T "$SERVICENAME" \
         sh -c 'mariadb -u root -p"$MYSQL_ROOT_PASSWORD"'
     echo "✅ MariaDB restored"
 
@@ -239,9 +270,9 @@ elif [[ "$SELECTED" == *.mariadbdump.sql.gz ]]; then
 # RESTORE MySQL
 elif [[ "$SELECTED" == *.mysqldump.sql.gz ]]; then
     echo "🐬 Restoring MySQL..."
-    docker compose up -d "$CONTAINERNAME"
-    wait_healthy "$CONTAINERNAME" mysql
-    gunzip -c "$SELECTED" | docker compose exec -T "$CONTAINERNAME" \
+    docker compose up -d "$SERVICENAME"
+    wait_healthy "$SERVICENAME" mysql
+    gunzip -c "$SELECTED" | docker compose exec -T "$SERVICENAME" \
         sh -c 'mysql -u root -p"$MYSQL_ROOT_PASSWORD"'
     echo "✅ MySQL restored"
 
@@ -249,16 +280,16 @@ elif [[ "$SELECTED" == *.mysqldump.sql.gz ]]; then
 # RESTORE PostgreSQL
 elif [[ "$SELECTED" == *.postgredump.sql.gz ]]; then
     echo "🐘 Restoring PostgreSQL..."
-    docker compose up -d "$CONTAINERNAME"
-    wait_healthy "$CONTAINERNAME" postgres
-    CONTAINERENV_DBNAME=$(docker compose exec "$CONTAINERNAME" sh -c 'echo "${POSTGRES_DB:-}"')
-    CONTAINERENV_DBUSER=$(docker compose exec "$CONTAINERNAME" sh -c 'echo "${POSTGRES_USER:-}"')
+    docker compose up -d "$SERVICENAME"
+    wait_healthy "$SERVICENAME" postgres
+    CONTAINERENV_DBNAME=$(docker compose exec "$SERVICENAME" sh -c 'echo "${POSTGRES_DB:-}"')
+    CONTAINERENV_DBUSER=$(docker compose exec "$SERVICENAME" sh -c 'echo "${POSTGRES_USER:-}"')
     if [ -z "$CONTAINERENV_DBUSER" ]; then
         echo "❌ POSTGRES_USER is not set in container '${CONTAINERNAME}'."
         exit 1
     fi
     echo "  Database: '${CONTAINERENV_DBNAME:-postgres}', User: '${CONTAINERENV_DBUSER}'"
-    gunzip -c "$SELECTED" | docker compose exec -T "$CONTAINERNAME" \
+    gunzip -c "$SELECTED" | docker compose exec -T "$SERVICENAME" \
         psql -U "$CONTAINERENV_DBUSER" -d "${CONTAINERENV_DBNAME:-postgres}"
     echo "✅ PostgreSQL restored"
 
@@ -266,10 +297,10 @@ elif [[ "$SELECTED" == *.postgredump.sql.gz ]]; then
 # RESTORE MongoDB
 elif [[ "$SELECTED" == *.mongodump.sql.gz ]]; then
     echo "🍃 Restoring MongoDB..."
-    docker compose up -d "$CONTAINERNAME"
-    wait_healthy "$CONTAINERNAME" mongo
+    docker compose up -d "$SERVICENAME"
+    wait_healthy "$SERVICENAME" mongo
     # Fixed: use $CONTAINERNAME (not the undefined $CONTAINER variable)
-    gunzip -c "$SELECTED" | docker compose exec -T "$CONTAINERNAME" \
+    gunzip -c "$SELECTED" | docker compose exec -T "$SERVICENAME" \
         sh -c 'mongorestore --archive --gzip'
     echo "✅ MongoDB restored"
 
@@ -277,7 +308,7 @@ elif [[ "$SELECTED" == *.mongodump.sql.gz ]]; then
 # RESTORE GitLab
 elif [[ "$SELECTED" == *.gitlabbackup.tar.gz ]]; then
     echo "🦊 Restoring GitLab..."
-    docker compose up -d "$CONTAINERNAME"
+    docker compose up -d "$SERVICENAME"
 
     # Unpack backup archive into the GitLab backup mount
     GITLAB_BACKUP_HOST="/mnt/backup-cache/gitlab-backup"
@@ -285,11 +316,11 @@ elif [[ "$SELECTED" == *.gitlabbackup.tar.gz ]]; then
     tar -xzf "$SELECTED" -C "$GITLAB_BACKUP_HOST"
 
     # The extracted file must be owned by 'git' inside the container
-    docker compose exec "$CONTAINERNAME" bash -c \
+    docker compose exec "$SERVICENAME" bash -c \
         "chown git /mnt/backup-cache/gitlab-backup && chmod 700 /mnt/backup-cache/gitlab-backup"
 
     # Stop application services before restore
-    docker compose exec "$CONTAINERNAME" bash -c \
+    docker compose exec "$SERVICENAME" bash -c \
         "gitlab-ctl stop puma && gitlab-ctl stop sidekiq && gitlab-ctl status"
 
     # Determine the backup timestamp token from the archive filename
@@ -300,11 +331,11 @@ elif [[ "$SELECTED" == *.gitlabbackup.tar.gz ]]; then
         exit 1
     fi
 
-    docker compose exec "$CONTAINERNAME" bash -c \
+    docker compose exec "$SERVICENAME" bash -c \
         "gitlab-backup restore BACKUP=${BACKUP_TOKEN} force=yes"
-    docker compose exec "$CONTAINERNAME" bash -c \
+    docker compose exec "$SERVICENAME" bash -c \
         "gitlab-ctl restart && gitlab-rake gitlab:check SANITIZE=true && gitlab-rake gitlab:doctor:secrets"
-    docker compose exec "$CONTAINERNAME" bash -c \
+    docker compose exec "$SERVICENAME" bash -c \
         "gitlab-rake gitlab:artifacts:check && gitlab-rake gitlab:lfs:check && gitlab-rake gitlab:uploads:check"
     echo "✅ GitLab restored"
 
