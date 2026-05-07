@@ -38,38 +38,68 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Wait until a compose service is healthy (or running if no healthcheck defined).
-# Usage: wait_healthy <service_name>
+# Wait until a compose service is ready to accept connections.
+# Priority: (1) Docker healthcheck → (2) in-container DB ping → (3) plain running state
+# Usage: wait_healthy <service_name> [db_type]
+#   db_type: mariadb | mysql | postgres | mongo (optional – enables in-container probe)
 wait_healthy() {
     local service="$1"
+    local db_type="${2:-}"
     local elapsed=0
+
+    echo "⏳ Waiting for '${service}' to be ready (timeout: ${TIMEOUT}s)..."
 
     while true; do
         local cid
         cid=$(docker compose ps -q "$service" 2>/dev/null || true)
 
-        if [ -z "$cid" ]; then
-            echo "⚠️  Container for service '${service}' not found yet, waiting..."
-        else
-            local status
-            status=$(docker inspect --format='{{.State.Health.Status}}' "$cid" 2>/dev/null || true)
-
-            if [ "$status" == "healthy" ]; then
-                echo "✅ Container '${service}' is healthy. Starting restore..."
+        if [ -n "$cid" ]; then
+            # --- Check 1: Docker healthcheck (if defined) ---
+            local health
+            health=$(docker inspect --format='{{.State.Health.Status}}' "$cid" 2>/dev/null || true)
+            if [ "$health" == "healthy" ]; then
+                echo "✅ '${service}' is healthy."
                 return 0
-            elif [ -z "$status" ] || [ "$status" == "<no value>" ]; then
-                # No healthcheck defined – fall back to checking if container is running
-                local running
-                running=$(docker inspect --format='{{.State.Running}}' "$cid" 2>/dev/null || true)
-                if [ "$running" == "true" ]; then
-                    echo "ℹ️  No healthcheck defined for '${service}'. Container is running, proceeding..."
+            fi
+
+            # --- Check 2: In-container DB readiness probe (no healthcheck defined) ---
+            # Runs inside the container → network-topology independent
+            if [ -z "$health" ] || [ "$health" == "<no value>" ]; then
+                local ready=false
+                case "$db_type" in
+                    mariadb|mysql)
+                        docker exec "$cid" sh -c \
+                            'mariadb-admin ping -u root -p"${MYSQL_ROOT_PASSWORD}" --silent' \
+                            2>/dev/null && ready=true || true
+                        ;;
+                    postgres)
+                        docker exec "$cid" sh -c \
+                            'pg_isready -U "${POSTGRES_USER}" --quiet' \
+                            2>/dev/null && ready=true || true
+                        ;;
+                    mongo)
+                        docker exec "$cid" sh -c \
+                            'mongosh --quiet --eval "db.adminCommand(\"ping\")" 2>/dev/null || \
+                             mongo --quiet --eval "db.adminCommand(\"ping\")" 2>/dev/null' \
+                            2>/dev/null && ready=true || true
+                        ;;
+                    *)
+                        # Non-DB service: just check if container is running
+                        local running
+                        running=$(docker inspect --format='{{.State.Running}}' "$cid" 2>/dev/null || true)
+                        [ "$running" == "true" ] && ready=true
+                        ;;
+                esac
+
+                if [ "$ready" == "true" ]; then
+                    echo "✅ '${service}' is ready."
                     return 0
                 fi
             fi
         fi
 
         if [ "$elapsed" -ge "$TIMEOUT" ]; then
-            echo "❌ Timeout after ${TIMEOUT}s: '${service}' is not healthy/running."
+            echo "❌ Timeout after ${TIMEOUT}s: '${service}' is not ready."
             exit 1
         fi
 
@@ -178,7 +208,7 @@ if [[ "$SELECTED" == *.compose.tar.gz ]]; then
 elif [[ "$SELECTED" == *.mariadbdump.sql.gz ]]; then
     echo "🐬 Restoring MariaDB..."
     docker compose up -d "$CONTAINERNAME"
-    wait_healthy "$CONTAINERNAME"
+    wait_healthy "$CONTAINERNAME" mariadb
     CONTAINERENV_ROOTPW=$(docker compose exec "$CONTAINERNAME" sh -c 'echo "${MYSQL_ROOT_PASSWORD:-}"')
     if [ -z "$CONTAINERENV_ROOTPW" ]; then
         echo "❌ MYSQL_ROOT_PASSWORD is not set in container '${CONTAINERNAME}'."
@@ -193,7 +223,7 @@ elif [[ "$SELECTED" == *.mariadbdump.sql.gz ]]; then
 elif [[ "$SELECTED" == *.mysqldump.sql.gz ]]; then
     echo "🐬 Restoring MySQL..."
     docker compose up -d "$CONTAINERNAME"
-    wait_healthy "$CONTAINERNAME"
+    wait_healthy "$CONTAINERNAME" mysql
     CONTAINERENV_ROOTPW=$(docker compose exec "$CONTAINERNAME" sh -c 'echo "${MYSQL_ROOT_PASSWORD:-}"')
     if [ -z "$CONTAINERENV_ROOTPW" ]; then
         echo "❌ MYSQL_ROOT_PASSWORD is not set in container '${CONTAINERNAME}'."
@@ -208,14 +238,14 @@ elif [[ "$SELECTED" == *.mysqldump.sql.gz ]]; then
 elif [[ "$SELECTED" == *.postgredump.sql.gz ]]; then
     echo "🐘 Restoring PostgreSQL..."
     docker compose up -d "$CONTAINERNAME"
-    wait_healthy "$CONTAINERNAME"
+    wait_healthy "$CONTAINERNAME" postgres
     CONTAINERENV_DBNAME=$(docker compose exec "$CONTAINERNAME" sh -c 'echo "${POSTGRES_DB:-}"')
     CONTAINERENV_DBUSER=$(docker compose exec "$CONTAINERNAME" sh -c 'echo "${POSTGRES_USER:-}"')
     if [ -z "$CONTAINERENV_DBUSER" ]; then
         echo "❌ POSTGRES_USER is not set in container '${CONTAINERNAME}'."
         exit 1
     fi
-    echo "  Database: '${CONTAINERENV_DBNAME}', User: '${CONTAINERENV_DBUSER}'"
+    echo "  Database: '${CONTAINERENV_DBNAME:-postgres}', User: '${CONTAINERENV_DBUSER}'"
     gunzip -c "$SELECTED" | docker compose exec -T "$CONTAINERNAME" \
         psql -U "$CONTAINERENV_DBUSER" -d "${CONTAINERENV_DBNAME:-postgres}"
     echo "✅ PostgreSQL restored"
@@ -225,7 +255,7 @@ elif [[ "$SELECTED" == *.postgredump.sql.gz ]]; then
 elif [[ "$SELECTED" == *.mongodump.sql.gz ]]; then
     echo "🍃 Restoring MongoDB..."
     docker compose up -d "$CONTAINERNAME"
-    wait_healthy "$CONTAINERNAME"
+    wait_healthy "$CONTAINERNAME" mongo
     # Fixed: use $CONTAINERNAME (not the undefined $CONTAINER variable)
     gunzip -c "$SELECTED" | docker compose exec -T "$CONTAINERNAME" \
         sh -c 'mongorestore --archive --gzip'
