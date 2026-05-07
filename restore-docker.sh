@@ -39,7 +39,10 @@ cleanup() {
 trap cleanup EXIT
 
 # Wait until a compose service is ready to accept connections.
-# Priority: (1) Docker healthcheck → (2) in-container DB ping → (3) plain running state
+# Priority: (1a) Docker healthcheck status = healthy
+#           (1b) Re-run the healthcheck test cmd directly (catches broken CMD vs CMD-SHELL configs)
+#           (2)  In-container DB ping (no healthcheck defined at all)
+#           (3)  Plain running state (non-DB services)
 # Usage: wait_healthy <service_name> [db_type]
 #   db_type: mariadb | mysql | postgres | mongo (optional – enables in-container probe)
 wait_healthy() {
@@ -54,12 +57,29 @@ wait_healthy() {
         cid=$(docker compose ps -q "$service" 2>/dev/null || true)
 
         if [ -n "$cid" ]; then
-            # --- Check 1: Docker healthcheck (if defined) ---
+            # --- Check 1a: Docker healthcheck status ---
             local health
             health=$(docker inspect --format='{{.State.Health.Status}}' "$cid" 2>/dev/null || true)
             if [ "$health" == "healthy" ]; then
                 echo "✅ '${service}' is healthy."
                 return 0
+            fi
+
+            # --- Check 1b: Re-run the healthcheck test command ourselves ---
+            # Handles misconfigured healthchecks (e.g. CMD instead of CMD-SHELL)
+            # by running the test string via sh -c directly in the container.
+            if [ "$health" == "starting" ] || [ "$health" == "unhealthy" ]; then
+                local hc_test
+                # Extract the test array: first element is CMD/CMD-SHELL, rest is the command
+                hc_test=$(docker inspect \
+                    --format='{{range $i,$v := .Config.Healthcheck.Test}}{{if gt $i 1}} {{end}}{{if gt $i 0}}{{$v}}{{end}}{{end}}' \
+                    "$cid" 2>/dev/null || true)
+                if [ -n "$hc_test" ]; then
+                    if docker exec "$cid" sh -c "$hc_test" 2>/dev/null; then
+                        echo "✅ '${service}' passed healthcheck test."
+                        return 0
+                    fi
+                fi
             fi
 
             # --- Check 2: In-container DB readiness probe (no healthcheck defined) ---
@@ -74,7 +94,7 @@ wait_healthy() {
                         ;;
                     postgres)
                         docker exec "$cid" sh -c \
-                            'pg_isready -U "${POSTGRES_USER}" --quiet' \
+                            'pg_isready -U "$POSTGRES_USER" --quiet' \
                             2>/dev/null && ready=true || true
                         ;;
                     mongo)
