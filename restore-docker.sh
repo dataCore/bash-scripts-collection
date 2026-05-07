@@ -69,7 +69,7 @@ wait_healthy() {
                 case "$db_type" in
                     mariadb|mysql)
                         docker exec "$cid" sh -c \
-                            'mariadb-admin ping -u root -p"${MYSQL_ROOT_PASSWORD}" --silent' \
+                            'mariadb-admin ping -u root -p"$MYSQL_ROOT_PASSWORD" --silent' \
                             2>/dev/null && ready=true || true
                         ;;
                     postgres)
@@ -209,13 +209,10 @@ elif [[ "$SELECTED" == *.mariadbdump.sql.gz ]]; then
     echo "🐬 Restoring MariaDB..."
     docker compose up -d "$CONTAINERNAME"
     wait_healthy "$CONTAINERNAME" mariadb
-    CONTAINERENV_ROOTPW=$(docker compose exec "$CONTAINERNAME" sh -c 'echo "${MYSQL_ROOT_PASSWORD:-}"')
-    if [ -z "$CONTAINERENV_ROOTPW" ]; then
-        echo "❌ MYSQL_ROOT_PASSWORD is not set in container '${CONTAINERNAME}'."
-        exit 1
-    fi
+    # Pass password via MYSQL_PWD env var inside the container – avoids
+    # trailing-newline issues from $() and special-char quoting problems.
     gunzip -c "$SELECTED" | docker compose exec -T "$CONTAINERNAME" \
-        sh -c "mariadb -u root -p${CONTAINERENV_ROOTPW}"
+        sh -c 'mariadb -u root -p"$MYSQL_ROOT_PASSWORD"'
     echo "✅ MariaDB restored"
 
 # =======================================================================
@@ -224,13 +221,8 @@ elif [[ "$SELECTED" == *.mysqldump.sql.gz ]]; then
     echo "🐬 Restoring MySQL..."
     docker compose up -d "$CONTAINERNAME"
     wait_healthy "$CONTAINERNAME" mysql
-    CONTAINERENV_ROOTPW=$(docker compose exec "$CONTAINERNAME" sh -c 'echo "${MYSQL_ROOT_PASSWORD:-}"')
-    if [ -z "$CONTAINERENV_ROOTPW" ]; then
-        echo "❌ MYSQL_ROOT_PASSWORD is not set in container '${CONTAINERNAME}'."
-        exit 1
-    fi
     gunzip -c "$SELECTED" | docker compose exec -T "$CONTAINERNAME" \
-        sh -c "mysql -u root -p${CONTAINERENV_ROOTPW}"
+        sh -c 'mysql -u root -p"$MYSQL_ROOT_PASSWORD"'
     echo "✅ MySQL restored"
 
 # =======================================================================
