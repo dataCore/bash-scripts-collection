@@ -38,6 +38,28 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Start a compose service and surface a clear error if it fails.
+# docker compose up -d swallows the OCI/runc error text – we capture stderr
+# and print it explicitly so the operator knows what to fix.
+compose_up() {
+    local service="$1"
+    local output
+    if ! output=$(docker compose up -d "$service" 2>&1); then
+        echo "❌ Failed to start service '${service}':"
+        echo "$output" | sed 's/^/   /'
+        # Common hint: missing bind-mount source files on the host
+        if echo "$output" | grep -q "not a directory\|No such file or directory"; then
+            echo ""
+            echo "💡 Hint: A bind-mount source path is missing on this host."
+            echo "   Check the volumes: section in docker-compose.yml and ensure"
+            echo "   all host paths exist with the correct type (file vs directory)."
+            echo "   Example fix:  echo 'Europe/Zurich' > /etc/timezone"
+        fi
+        exit 1
+    fi
+    echo "$output"
+}
+
 # Wait until a compose service is ready to accept connections.
 # Priority: (1a) Docker healthcheck status = healthy
 #           (1b) Re-run the healthcheck test cmd directly (catches broken CMD vs CMD-SHELL configs)
@@ -89,7 +111,7 @@ wait_healthy() {
                 case "$db_type" in
                     mariadb|mysql)
                         docker exec "$cid" sh -c \
-                            'mariadb-admin ping -u root -p"$MYSQL_ROOT_PASSWORD" --silent' \
+                            'mariadb-admin ping -u root -p"${MYSQL_ROOT_PASSWORD:-$DB_ROOT_PASSWORD}" --silent' \
                             2>/dev/null && ready=true || true
                         ;;
                     postgres)
@@ -261,29 +283,43 @@ if [[ "$SELECTED" == *.compose.tar.gz ]]; then
 # RESTORE MariaDB
 elif [[ "$SELECTED" == *.mariadbdump.sql.gz ]]; then
     echo "🐬 Restoring MariaDB..."
-    docker compose up -d "$SERVICENAME"
+    compose_up "$SERVICENAME"
     wait_healthy "$SERVICENAME" mariadb
-    # Pass password via MYSQL_PWD env var inside the container – avoids
-    # trailing-newline issues from $() and special-char quoting problems.
+    # Verify root password is available inside the container.
+    # Supports MYSQL_ROOT_PASSWORD (standard) and DB_ROOT_PASSWORD (some stacks).
+    ROOTPW_CHECK=$(docker compose exec "$SERVICENAME" \
+        sh -c 'echo "${MYSQL_ROOT_PASSWORD:-${DB_ROOT_PASSWORD:-}}"' 2>/dev/null | tr -d '\r\n')
+    if [ -z "$ROOTPW_CHECK" ]; then
+        echo "❌ Neither MYSQL_ROOT_PASSWORD nor DB_ROOT_PASSWORD is set in container '${SERVICENAME}'."
+        echo "   Check the env_file / environment: section in your docker-compose.yml."
+        exit 1
+    fi
     gunzip -c "$SELECTED" | docker compose exec -T "$SERVICENAME" \
-        sh -c 'mariadb -u root -p"$MYSQL_ROOT_PASSWORD"'
+        sh -c 'mariadb -u root -p"${MYSQL_ROOT_PASSWORD:-$DB_ROOT_PASSWORD}"'
     echo "✅ MariaDB restored"
 
 # =======================================================================
 # RESTORE MySQL
 elif [[ "$SELECTED" == *.mysqldump.sql.gz ]]; then
     echo "🐬 Restoring MySQL..."
-    docker compose up -d "$SERVICENAME"
+    compose_up "$SERVICENAME"
     wait_healthy "$SERVICENAME" mysql
+    ROOTPW_CHECK=$(docker compose exec "$SERVICENAME" \
+        sh -c 'echo "${MYSQL_ROOT_PASSWORD:-${DB_ROOT_PASSWORD:-}}"' 2>/dev/null | tr -d '\r\n')
+    if [ -z "$ROOTPW_CHECK" ]; then
+        echo "❌ Neither MYSQL_ROOT_PASSWORD nor DB_ROOT_PASSWORD is set in container '${SERVICENAME}'."
+        echo "   Check the env_file / environment: section in your docker-compose.yml."
+        exit 1
+    fi
     gunzip -c "$SELECTED" | docker compose exec -T "$SERVICENAME" \
-        sh -c 'mysql -u root -p"$MYSQL_ROOT_PASSWORD"'
+        sh -c 'mysql -u root -p"${MYSQL_ROOT_PASSWORD:-$DB_ROOT_PASSWORD}"'
     echo "✅ MySQL restored"
 
 # =======================================================================
 # RESTORE PostgreSQL
 elif [[ "$SELECTED" == *.postgredump.sql.gz ]]; then
     echo "🐘 Restoring PostgreSQL..."
-    docker compose up -d "$SERVICENAME"
+    compose_up "$SERVICENAME"
     wait_healthy "$SERVICENAME" postgres
     CONTAINERENV_DBNAME=$(docker compose exec "$SERVICENAME" sh -c 'echo "${POSTGRES_DB:-}"')
     CONTAINERENV_DBUSER=$(docker compose exec "$SERVICENAME" sh -c 'echo "${POSTGRES_USER:-}"')
@@ -300,7 +336,7 @@ elif [[ "$SELECTED" == *.postgredump.sql.gz ]]; then
 # RESTORE MongoDB
 elif [[ "$SELECTED" == *.mongodump.sql.gz ]]; then
     echo "🍃 Restoring MongoDB..."
-    docker compose up -d "$SERVICENAME"
+    compose_up "$SERVICENAME"
     wait_healthy "$SERVICENAME" mongo
     # Fixed: use $CONTAINERNAME (not the undefined $CONTAINER variable)
     gunzip -c "$SELECTED" | docker compose exec -T "$SERVICENAME" \
@@ -311,7 +347,7 @@ elif [[ "$SELECTED" == *.mongodump.sql.gz ]]; then
 # RESTORE GitLab
 elif [[ "$SELECTED" == *.gitlabbackup.tar.gz ]]; then
     echo "🦊 Restoring GitLab..."
-    docker compose up -d "$SERVICENAME"
+    compose_up "$SERVICENAME"
 
     # Unpack backup archive into the GitLab backup mount
     GITLAB_BACKUP_HOST="/mnt/backup-cache/gitlab-backup"
