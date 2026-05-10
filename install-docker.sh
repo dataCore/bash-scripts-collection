@@ -209,6 +209,7 @@ step_configure_daemon() {
   "ipv6": true,
   "fixed-cidr-v6": "${DOCKER_SUBNET_V6}",
   "ip6tables": true,
+  "live-restore": false,
   "log-driver": "json-file",
   "log-opts": {
     "max-size": "100m",
