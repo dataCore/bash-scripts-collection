@@ -163,7 +163,7 @@ for cont in $CONTAINERS; do
             commit_backup "$OUTPUT"
 
         # ---------------------------------------------------------------
-        elif echo "$IMAGE" | grep -qi "^postgres"; then
+        elif echo "$IMAGE" | grep -qiE "^postgres|timescale/timescaledb|postgis/postgis|bitnami/postgresql"; then
             # BACKUP PostgreSQL – dump once per container
             if [ "${DB_DONE[$cont]+set}" ]; then continue; fi
             DB_DONE[$cont]=1
