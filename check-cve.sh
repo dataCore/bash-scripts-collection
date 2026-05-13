@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# check-cve-2026 – geek.ch Security Check Script
+# check-cve – geek.ch Security Check Script
 # Repository: https://code.geek.ch/dataCore/bash-scripts-collection
 #
 # Checks for active exposure to:
@@ -9,9 +9,9 @@
 #   CVE-2026-43500  "Dirty Frag"  – rxrpc subsystem
 #
 # Usage:
-#   check-cve-2026            # interactive output
-#   check-cve-2026 --fix      # apply mitigations automatically
-#   check-cve-2026 --json     # machine-readable JSON output
+#   check-cve            # interactive output
+#   check-cve --fix      # apply mitigations automatically
+#   check-cve --json     # machine-readable JSON output
 #
 # Advisories:
 #   https://ubuntu.com/blog/copy-fail-vulnerability-fixes-available
@@ -58,7 +58,7 @@ declare -A JSON_FIELDS
 # ── Header ────────────────────────────────────────────────────────────────────
 if [[ "$MODE" != "json" ]]; then
     echo -e "${BOLD}============================================================${RESET}"
-    echo -e "${BOLD} geek.ch Linux Security Check – CVE-2026-31431 / 43284 / 43500${RESET}"
+    echo -e "${BOLD} geek.ch Linux Security – CVE CHECKER ${RESET}"
     echo -e "${BOLD}============================================================${RESET}"
     echo    "  Host   : $(hostname -f 2>/dev/null || hostname)"
     echo    "  Kernel : $(uname -r)"
@@ -243,7 +243,7 @@ echo    "  1. System patchen (höchste Priorität):"
 echo    "       apt update && apt full-upgrade && reboot"
 echo    ""
 echo    "  2. Sofort-Mitigation anwenden (falls noch ungepatcht):"
-echo    "       sudo check-cve-2026 --fix"
+echo    "       sudo check-cve --fix"
 echo    ""
 echo    "  3. Copy Fail PoC / Info:"
 echo    "       https://ubuntu.com/blog/copy-fail-vulnerability-fixes-available"
@@ -251,7 +251,4 @@ echo    ""
 echo    "  4. Dirty Frag PoC / Info:"
 echo    "       https://github.com/V4bel/dirtyfrag"
 echo    "       https://www.wiz.io/blog/dirty-frag-linux-kernel-local-privilege-escalation-via-esp-and-rxrpc"
-echo    ""
-echo    "  5. Alle Hosts per SSH prüfen:"
-echo    "       for H in \${HOSTS[@]}; do echo \"=== \$H ===\"; ssh root@\$H check-cve-2026 --json; done"
 echo -e "${BOLD}============================================================${RESET}\n"
