@@ -6,6 +6,7 @@ scripts=(
     "backup-docker.sh:backup-docker"
     "backup-docker-all.sh:backup-docker-all"
     "backup-remoteserver.sh:backup-remoteserver"
+    "check-cve.sh:check-cve"
     "install-docker.sh:install-docker"
 	"install-mon.sh:install-mon"
     "install-ssh.sh:install-ssh"
