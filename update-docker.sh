@@ -41,7 +41,6 @@ if git -C "$WORKINGDIR" rev-parse --is-inside-work-tree &>/dev/null; then
     GIT_UNPUSHED=$(git -C "$WORKINGDIR" log @{u}.. --oneline 2>/dev/null || true)
 
     if [ -n "$GIT_STATUS" ] || [ -n "$GIT_UNPUSHED" ]; then
-        echo ""
         echo "⚠️  WARNING: Pending Git changes detected in '${WORKINGDIR}'!"
         if [ -n "$GIT_STATUS" ]; then
             echo "   Uncommitted changes:"
@@ -51,9 +50,6 @@ if git -C "$WORKINGDIR" rev-parse --is-inside-work-tree &>/dev/null; then
             echo "   Unpushed commits:"
             echo "$GIT_UNPUSHED" | sed 's/^/     /'
         fi
-        echo ""
-        echo "   ⚠️  These local changes may be overwritten or conflict with the update."
-        echo ""
     fi
 fi
 
