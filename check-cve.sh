@@ -8,6 +8,7 @@
 #   CVE-2026-43284  "Dirty Frag"  – esp4 / esp6 (IPsec/xfrm subsystem)
 #   CVE-2026-43500  "Dirty Frag"  – rxrpc subsystem
 #   CVE-2026-46300  "Fragnesia"   – XFRM ESP-in-TCP (skb_try_coalesce / shared-frag marker)
+#   CVE-2026-23268..23411 "CrackArmor" – AppArmor confused-deputy LPE (kernel + util-linux)
 #
 # Usage:
 #   check-cve            # interactive output
@@ -21,6 +22,8 @@
 #   https://github.com/v12-security/pocs/tree/main/fragnesia
 #   https://almalinux.org/blog/2026-05-13-fragnesia-cve-2026-46300/
 #   https://blog.cloudlinux.com/fragnesia-mitigation-and-kernel-update
+#   https://ubuntu.com/security/vulnerabilities/crackarmor
+#   https://blog.qualys.com/vulnerabilities-threat-research/2026/03/12/crackarmor-critical-apparmor-flaws-enable-local-privilege-escalation-to-root
 # =============================================================================
 
 set -euo pipefail
@@ -73,7 +76,7 @@ if [[ "$MODE" != "json" ]]; then
 fi
 
 # ── CVE-2026-31431 – Copy Fail ────────────────────────────────────────────────
-[[ "$MODE" != "json" ]] && echo -e "\n${BOLD}[1/3] CVE-2026-31431 – \"Copy Fail\" (algif_aead / AF_ALG)${RESET}"
+[[ "$MODE" != "json" ]] && echo -e "\n${BOLD}[1/4] CVE-2026-31431 – \"Copy Fail\" (algif_aead / AF_ALG)${RESET}"
 
 COPYFAIL_STATUS="ok"
 
@@ -125,7 +128,7 @@ fi
 JSON_FIELDS[copyfail]="$COPYFAIL_STATUS"
 
 # ── CVE-2026-43284/43500 – Dirty Frag ────────────────────────────────────────
-[[ "$MODE" != "json" ]] && echo -e "\n${BOLD}[2/3] CVE-2026-43284/43500 – \"Dirty Frag\" (esp4 / esp6 / rxrpc)${RESET}"
+[[ "$MODE" != "json" ]] && echo -e "\n${BOLD}[2/4] CVE-2026-43284/43500 – \"Dirty Frag\" (esp4 / esp6 / rxrpc)${RESET}"
 
 DIRTYFRAG_STATUS="ok"
 LOADED_MODS=()
@@ -169,7 +172,7 @@ JSON_FIELDS[ipsec_active]="$IPSEC_ACTIVE"
 # unprivileged write primitive into read-only files (e.g. /usr/bin/su).
 # PoC achieves root in a single command; no race condition required.
 # Mitigation: identical to Dirty Frag — blacklist esp4/esp6/rxrpc.
-[[ "$MODE" != "json" ]] && echo -e "\n${BOLD}[3/3] CVE-2026-46300 – \"Fragnesia\" (XFRM ESP-in-TCP / skb_try_coalesce)${RESET}"
+[[ "$MODE" != "json" ]] && echo -e "\n${BOLD}[3/4] CVE-2026-46300 – \"Fragnesia\" (XFRM ESP-in-TCP / skb_try_coalesce)${RESET}"
 
 FRAGNESIA_STATUS="ok"
 
@@ -223,78 +226,335 @@ fi
 
 JSON_FIELDS[fragnesia]="$FRAGNESIA_STATUS"
 
-# ── Kernel / Patch status ─────────────────────────────────────────────────────
-# Strategy: check the installed kernel package's changelog for the specific
-# upstream commit hashes that fix each CVE. More reliable than version string
-# comparison since Debian/Ubuntu backport patches into older version numbers
-# with different build suffixes (e.g. 6.8.0-58.60 → fix in 6.8.0-60.62).
+# ── CVE-2026-23268..23411 – CrackArmor ───────────────────────────────────────
+# Nine confused-deputy vulnerabilities in the AppArmor Linux Security Module,
+# discovered by Qualys TRU. An unprivileged user can open AppArmor policy
+# pseudo-files under /sys/kernel/security/apparmor/ and coerce a privileged
+# setuid binary (e.g. su, sudo, Postfix) into writing attacker-controlled data
+# to them, bypassing all permission checks. Combined with kernel-level parser
+# flaws (UAF, OOB reads/writes), this enables:
+#   - Full AppArmor policy management (load/replace/remove profiles)
+#   - Bypass of unprivileged user-namespace restrictions
+#   - Local privilege escalation to root (CVSS 7.8–8.8)
+#   - Container isolation bypass
+#   - KASLR disclosure via out-of-bounds reads
 #
-# Upstream fix commits (also referenced by CVE number in Debian/Ubuntu changelogs):
-#   CVE-2026-31431  a664bf3d603d  "crypto: algif_aead - Revert to operating out-of-place"
-#   CVE-2026-43284  e91c6cb57978  "esp: fix in-place decryption over paged buffers"
-#   CVE-2026-43500  b29d4a88e8ae  "rxrpc: fix in-place decryption over paged buffers"
-#   CVE-2026-46300  3f8a2d1c905b  "net: skbuff: preserve shared-frag marker during coalescing"
+# Affected: all Linux kernels >= 4.11 where AppArmor is enabled (Ubuntu, Debian, SUSE)
+# NOT affected: RHEL/CentOS/Rocky/AlmaLinux (use SELinux, not AppArmor)
+#
+# Fix requires TWO components:
+#   1. Patched kernel (AppArmor LSM fixes)
+#   2. Patched util-linux / login package (su hardening – closes the deputy path)
+#
+# No modprobe.d-style mitigation exists. Patch is the only reliable fix.
+# Disabling AppArmor entirely would be counterproductive and is NOT recommended.
+
+[[ "$MODE" != "json" ]] && echo -e "\n${BOLD}[4/4] CVE-2026-23268..23411 – \"CrackArmor\" (AppArmor / confused-deputy LPE)${RESET}"
+
+CRACKARMOR_STATUS="ok"
+CRACKARMOR_APPARMOR="inactive"
+
+# 4a. Is AppArmor active? (Not affected if disabled or SELinux in use)
+if command -v aa-status &>/dev/null && aa-status --enabled 2>/dev/null; then
+    CRACKARMOR_APPARMOR="active"
+    info "AppArmor is enabled – system is in scope for CrackArmor"
+elif [[ -d /sys/kernel/security/apparmor ]]; then
+    CRACKARMOR_APPARMOR="active"
+    info "AppArmor securityfs present – system is in scope for CrackArmor"
+else
+    ok "AppArmor is not active – system is NOT in scope for CrackArmor"
+    CRACKARMOR_STATUS="not_applicable"
+fi
+
+# 4b. Only run further checks if AppArmor is active
+if [[ "$CRACKARMOR_APPARMOR" == "active" ]]; then
+
+    # 4c. Check if the AppArmor policy interfaces are writable by unprivileged users
+    #     On a patched kernel the permissions on .load/.replace/.remove are restricted.
+    AA_FS="/sys/kernel/security/apparmor"
+    for iface in .load .replace .remove; do
+        if [[ -e "${AA_FS}/${iface}" ]]; then
+            perms=$(stat -c '%a' "${AA_FS}/${iface}" 2>/dev/null || echo "unknown")
+            if [[ "$perms" == "unknown" ]]; then
+                miss "  ${AA_FS}/${iface}: cannot read permissions"
+            elif [[ "$perms" =~ [2367] ]]; then
+                # world-writable or group-writable bit set
+                warn "  ${AA_FS}/${iface}: permissions ${perms} – world/group-writable (unpatched kernel)"
+                CRACKARMOR_STATUS="vulnerable"
+            else
+                ok "  ${AA_FS}/${iface}: permissions ${perms} (write-restricted)"
+            fi
+        fi
+    done
+
+    # 4d. Check util-linux / login package version (su hardening)
+    #     Patched versions close the deputy path via su by dropping fd inheritance.
+    #     Known fixed versions:
+    #       Debian 12 bookworm:  util-linux 2.38.1-5+deb12u2 (DSA-XXXX / March 2026)
+    #       Debian 13 trixie:    util-linux 2.41-4
+    #       Ubuntu 24.04 noble:  util-linux 2.39.3-9ubuntu6.2
+    #       Ubuntu 22.04 jammy:  util-linux 2.37.2-4ubuntu3.4
+    ULVER=$(dpkg --status util-linux 2>/dev/null | awk '/^Version:/{print $2}')
+    if [[ -z "$ULVER" ]]; then
+        miss "util-linux package not found – cannot check su hardening"
+    else
+        info "util-linux installed: ${ULVER}"
+        ULFIX=false
+        case "${_DISTRO_ID}:${_DISTRO_VER}" in
+            debian:bookworm) dpkg --compare-versions "$ULVER" ge "2.38.1-5+deb12u2" 2>/dev/null && ULFIX=true ;;
+            debian:trixie|debian:forky) dpkg --compare-versions "$ULVER" ge "2.41-4" 2>/dev/null && ULFIX=true ;;
+            debian:sid|debian:unstable) dpkg --compare-versions "$ULVER" ge "2.41-4" 2>/dev/null && ULFIX=true ;;
+            ubuntu:noble)  dpkg --compare-versions "$ULVER" ge "2.39.3-9ubuntu6.2" 2>/dev/null && ULFIX=true ;;
+            ubuntu:jammy)  dpkg --compare-versions "$ULVER" ge "2.37.2-4ubuntu3.4"  2>/dev/null && ULFIX=true ;;
+            ubuntu:focal)  dpkg --compare-versions "$ULVER" ge "2.34-0.1ubuntu9.6"  2>/dev/null && ULFIX=true ;;
+            *) miss "  Unknown release – cannot verify util-linux fix version" ;;
+        esac
+        if [[ "$ULFIX" == "true" ]]; then
+            ok "util-linux su hardening patch installed (CrackArmor deputy path blocked)"
+        else
+            warn "util-linux su hardening NOT installed – CrackArmor deputy path open"
+            info "  → apt update && apt install util-linux login"
+            [[ "$CRACKARMOR_STATUS" != "vulnerable" ]] && CRACKARMOR_STATUS="partial"
+        fi
+    fi
+
+    # 4e. Check if sudo is patched (Ubuntu-specific – Debian does not ship sudo fixes)
+    if [[ "${_DISTRO_ID}" == "ubuntu" ]] && command -v sudo &>/dev/null; then
+        SUDOVER=$(dpkg --status sudo 2>/dev/null | awk '/^Version:/{print $2}')
+        if [[ -n "$SUDOVER" ]]; then
+            info "sudo installed: ${SUDOVER}"
+            SUDOFIX=false
+            case "${_DISTRO_VER}" in
+                noble)  dpkg --compare-versions "$SUDOVER" ge "1.9.15p5-3ubuntu5.2" 2>/dev/null && SUDOFIX=true ;;
+                jammy)  dpkg --compare-versions "$SUDOVER" ge "1.9.9-1ubuntu2.4"    2>/dev/null && SUDOFIX=true ;;
+                focal)  dpkg --compare-versions "$SUDOVER" ge "1.8.31-1ubuntu1.5"   2>/dev/null && SUDOFIX=true ;;
+            esac
+            if [[ "$SUDOFIX" == "true" ]]; then
+                ok "sudo CrackArmor patch installed"
+            else
+                warn "sudo CrackArmor patch NOT installed"
+                info "  → apt update && apt install sudo"
+                [[ "$CRACKARMOR_STATUS" != "vulnerable" ]] && CRACKARMOR_STATUS="partial"
+            fi
+        fi
+    fi
+
+    [[ "$MODE" != "json" ]] && info "Advisory: https://ubuntu.com/security/vulnerabilities/crackarmor"
+fi
+
+JSON_FIELDS[crackarmor]="$CRACKARMOR_STATUS"
+JSON_FIELDS[crackarmor_apparmor]="$CRACKARMOR_APPARMOR"
+# Strategy (Debian/Ubuntu):
+#
+# 1. Version comparison against known-fixed package versions (primary, no network).
+#    Debian uses dpkg version strings (e.g. 6.1.170-1), Ubuntu uses ABI strings
+#    (e.g. 6.8.0-60.62). dpkg --compare-versions handles both correctly.
+#
+# 2. zgrep on the local changelog as confirmation/fallback:
+#    - Debian kernel packages ship changelog.gz (upstream), NOT changelog.Debian.gz
+#    - Ubuntu kernel packages ship changelog.Debian.gz
+#    Both are tried.
+#
+# Known fixed versions (Debian stable / Ubuntu LTS):
+#   CVE-2026-31431 (Copy Fail):
+#     Debian 12 bookworm:  linux 6.1.170-1   (DSA-XXXX)
+#     Debian 13 trixie:    linux 6.12.85-1
+#     Ubuntu 24.04 noble:  linux 6.8.0-60.62
+#     Ubuntu 22.04 jammy:  linux 5.15.0-140.150
+#
+#   CVE-2026-43284/43500 (Dirty Frag):
+#     Debian bookworm:     NOT YET PATCHED in stable (only sid: 7.0.4-1)
+#     Debian trixie:       NOT YET PATCHED in stable
+#     Ubuntu 24.04:        NOT YET PATCHED
+#
+#   CVE-2026-46300 (Fragnesia):
+#     Debian bookworm:     NOT YET PATCHED (disclosed today)
+#     Ubuntu all releases: NOT YET PATCHED (tracker: "needs evaluation")
+#
+#   CVE-2026-23268..23411 (CrackArmor):
+#     Kernel fix committed upstream (7.0-rc4); check done via apparmor fs
+#     permissions and util-linux/sudo package version – see section [4/4].
+#
+# Sources: security-tracker.debian.org, ubuntu.com/security, ostechnix.com
 
 PATCH_COPYFAIL="unknown"
 PATCH_DIRTYFRAG="unknown"
 PATCH_FRAGNESIA="unknown"
 
-# Helper: search Debian/Ubuntu kernel package changelog for a pattern.
-# Returns "patched", "not_patched", or "unknown" (changelog unreadable/missing).
-kernel_changelog_check() {
-    local pattern="$1"
-    local pkgname changelog=""
-
+# Get the dpkg version of the running kernel package.
+# Returns the version string (e.g. "6.1.170-1") or empty string.
+_kernel_pkg_version() {
+    local pkgname
     pkgname=$(dpkg --list 2>/dev/null \
         | awk '/^ii[[:space:]]+linux-image-'"$(uname -r | sed 's/[+.]/\\&/g')"'/{print $2}' \
         | head -1)
+    [[ -z "$pkgname" ]] && return
+    dpkg --status "$pkgname" 2>/dev/null | awk '/^Version:/{print $2}'
+}
 
-    if [[ -z "$pkgname" ]]; then
-        echo "unknown"
-        return
-    fi
+# Compare installed kernel package version against a known-fixed version.
+# Usage: kernel_version_ge <fixed_version>
+# Returns 0 (true) if installed >= fixed_version, 1 otherwise, 2 if unknown.
+kernel_version_ge() {
+    local fixed="$1"
+    local installed
+    installed=$(_kernel_pkg_version)
+    [[ -z "$installed" ]] && return 2
+    dpkg --compare-versions "$installed" ge "$fixed" && return 0 || return 1
+}
 
-    # 1st: local compressed changelog – fast, no network required
-    local clog_gz="/usr/share/doc/${pkgname}/changelog.Debian.gz"
-    if [[ -f "$clog_gz" ]]; then
-        changelog=$(zcat "$clog_gz" 2>/dev/null || true)
-    fi
-
-    # 2nd: apt-get changelog – fetches from mirrors if local copy is absent/empty
-    if [[ -z "$changelog" ]]; then
-        changelog=$(apt-get changelog --no-download-limit "$pkgname" 2>/dev/null || true)
-    fi
-
-    if [[ -z "$changelog" ]]; then
-        echo "unknown"
-        return
-    fi
-
-    if echo "$changelog" | grep -qiE "$pattern"; then
-        echo "patched"
-    else
-        echo "not_patched"
+# Search local changelog files (both .gz variants) for a grep pattern.
+# Returns "patched", "not_patched", or "" (not found in changelog).
+_changelog_grep() {
+    local pkgname="$1" pattern="$2"
+    local doc_dir="/usr/share/doc/${pkgname}"
+    # Debian kernel: changelog.gz (upstream); Ubuntu kernel: changelog.Debian.gz
+    for f in "${doc_dir}/changelog.gz" "${doc_dir}/changelog.Debian.gz"; do
+        if [[ -f "$f" ]]; then
+            if zgrep -qiE "$pattern" "$f" 2>/dev/null; then
+                echo "patched"; return
+            else
+                echo "not_patched"; return
+            fi
+        fi
+    done
+    # No local changelog found – try apt-get changelog (requires network)
+    local cl
+    cl=$(apt-get changelog --no-download-limit "$pkgname" 2>/dev/null || true)
+    if [[ -n "$cl" ]]; then
+        if echo "$cl" | grep -qiE "$pattern"; then
+            echo "patched"
+        else
+            echo "not_patched"
+        fi
     fi
 }
 
-if [[ "$MODE" != "json" ]]; then
-    echo -e "\n${BOLD}[Patch Status] Kernel: $(uname -r)${RESET}"
-    if [[ -f "/boot/vmlinuz-$(uname -r)" ]]; then
-        info "Build date: $(stat -c '%y' "/boot/vmlinuz-$(uname -r)" | cut -d' ' -f1)"
+# Main check: version comparison first, changelog as confirmation.
+# Usage: kernel_patch_check <fixed_version_or_"none"> <changelog_pattern>
+# "none" as fixed_version means: no patch available yet for this distro.
+kernel_patch_check() {
+    local fixed_ver="$1" pattern="$2"
+    local installed
+    installed=$(_kernel_pkg_version)
+
+    if [[ -z "$installed" ]]; then
+        echo "unknown"; return
     fi
-    info "Checking kernel changelogs for CVE fixes (may take a moment)..."
+
+    # "none" = explicitly known to be unpatched in all current stable releases
+    if [[ "$fixed_ver" == "none" ]]; then
+        echo "not_patched"; return
+    fi
+
+    # Primary: dpkg version comparison
+    if dpkg --compare-versions "$installed" ge "$fixed_ver" 2>/dev/null; then
+        echo "patched"; return
+    fi
+
+    # Secondary: changelog grep (catches backports with unusual version strings)
+    local pkgname
+    pkgname=$(dpkg --list 2>/dev/null \
+        | awk '/^ii[[:space:]]+linux-image-'"$(uname -r | sed 's/[+.]/\\&/g')"'/{print $2}' \
+        | head -1)
+    if [[ -n "$pkgname" ]]; then
+        local clog_result
+        clog_result=$(_changelog_grep "$pkgname" "$pattern")
+        if [[ "$clog_result" == "patched" ]]; then
+            echo "patched"; return
+        elif [[ "$clog_result" == "not_patched" ]]; then
+            echo "not_patched"; return
+        fi
+    fi
+
+    echo "not_patched"
+}
+
+# Detect distro family to pick the right fixed version
+_DISTRO_ID=$(grep "^ID=" /etc/os-release 2>/dev/null | cut -d= -f2 | tr -d '"')
+_DISTRO_VER=$(grep "^VERSION_CODENAME=" /etc/os-release 2>/dev/null | cut -d= -f2 | tr -d '"')
+
+# Select fixed versions based on distro/release
+case "${_DISTRO_ID}:${_DISTRO_VER}" in
+    debian:bookworm)
+        FIXED_COPYFAIL="6.1.170-1"
+        FIXED_DIRTYFRAG="none"   # not yet patched in bookworm stable
+        FIXED_FRAGNESIA="none"   # not yet patched
+        ;;
+    debian:trixie|debian:forky)
+        FIXED_COPYFAIL="6.12.85-1"
+        FIXED_DIRTYFRAG="none"
+        FIXED_FRAGNESIA="none"
+        ;;
+    debian:sid|debian:unstable)
+        FIXED_COPYFAIL="7.0.3-1"
+        FIXED_DIRTYFRAG="7.0.4-1"
+        FIXED_FRAGNESIA="none"   # patch pending as of 2026-05-14
+        ;;
+    ubuntu:noble)             # 24.04 LTS
+        FIXED_COPYFAIL="6.8.0-60.62"
+        FIXED_DIRTYFRAG="none"
+        FIXED_FRAGNESIA="none"
+        ;;
+    ubuntu:jammy)             # 22.04 LTS
+        FIXED_COPYFAIL="5.15.0-140.150"
+        FIXED_DIRTYFRAG="none"
+        FIXED_FRAGNESIA="none"
+        ;;
+    ubuntu:focal)             # 20.04 LTS
+        FIXED_COPYFAIL="5.4.0-220.240"
+        FIXED_DIRTYFRAG="none"
+        FIXED_FRAGNESIA="none"
+        ;;
+    *)
+        # Unknown release – fall back to changelog grep only (no version anchor)
+        FIXED_COPYFAIL=""
+        FIXED_DIRTYFRAG=""
+        FIXED_FRAGNESIA=""
+        ;;
+esac
+
+if [[ "$MODE" != "json" ]]; then
+    echo -e "\n${BOLD}[Patch Status] Kernel: $(uname -r) | Distro: ${_DISTRO_ID:-unknown} ${_DISTRO_VER:-}${RESET}"
+    if [[ -f "/boot/vmlinuz-$(uname -r)" ]]; then
+        info "Build date  : $(stat -c '%y' "/boot/vmlinuz-$(uname -r)" | cut -d' ' -f1)"
+    fi
+    _kpkgver=$(_kernel_pkg_version)
+    [[ -n "$_kpkgver" ]] && info "Pkg version : ${_kpkgver}"
+    info "Checking patch status (version compare + changelog)..."
 fi
 
 # CVE-2026-31431 – Copy Fail
-PATCH_COPYFAIL=$(kernel_changelog_check 'a664bf3d603d|CVE-2026-31431|algif_aead.*out-of-place|Revert.*algif_aead')
+# Upstream commit: a664bf3d603d
+if [[ -n "$FIXED_COPYFAIL" ]]; then
+    PATCH_COPYFAIL=$(kernel_patch_check "$FIXED_COPYFAIL" \
+        'a664bf3d603d|CVE-2026-31431|algif_aead.*out-of-place|Revert.*algif_aead')
+else
+    PATCH_COPYFAIL=$(kernel_patch_check "none" \
+        'a664bf3d603d|CVE-2026-31431|algif_aead.*out-of-place|Revert.*algif_aead')
+fi
 JSON_FIELDS[patch_copyfail]="$PATCH_COPYFAIL"
 
-# CVE-2026-43284 + CVE-2026-43500 – Dirty Frag (two commits, one check)
-PATCH_DIRTYFRAG=$(kernel_changelog_check 'e91c6cb57978|b29d4a88e8ae|CVE-2026-43284|CVE-2026-43500|esp.*in-place.*paged|rxrpc.*in-place.*paged')
+# CVE-2026-43284/43500 – Dirty Frag
+# Upstream commits: e91c6cb57978 / b29d4a88e8ae
+if [[ -n "$FIXED_DIRTYFRAG" ]]; then
+    PATCH_DIRTYFRAG=$(kernel_patch_check "$FIXED_DIRTYFRAG" \
+        'e91c6cb57978|b29d4a88e8ae|CVE-2026-43284|CVE-2026-43500|esp.*in-place.*paged|rxrpc.*in-place.*paged')
+else
+    PATCH_DIRTYFRAG=$(kernel_patch_check "none" \
+        'e91c6cb57978|b29d4a88e8ae|CVE-2026-43284|CVE-2026-43500|esp.*in-place.*paged|rxrpc.*in-place.*paged')
+fi
 JSON_FIELDS[patch_dirtyfrag]="$PATCH_DIRTYFRAG"
 
 # CVE-2026-46300 – Fragnesia
-PATCH_FRAGNESIA=$(kernel_changelog_check '3f8a2d1c905b|CVE-2026-46300|shared.frag.*coalescing|skb_try_coalesce.*SKBFL_SHARED_FRAG|preserve.*shared.frag')
+# Upstream commit: 3f8a2d1c905b
+if [[ -n "$FIXED_FRAGNESIA" ]]; then
+    PATCH_FRAGNESIA=$(kernel_patch_check "$FIXED_FRAGNESIA" \
+        '3f8a2d1c905b|CVE-2026-46300|shared.frag.*coalescing|skb_try_coalesce.*SKBFL_SHARED_FRAG|preserve.*shared.frag')
+else
+    PATCH_FRAGNESIA=$(kernel_patch_check "none" \
+        '3f8a2d1c905b|CVE-2026-46300|shared.frag.*coalescing|skb_try_coalesce.*SKBFL_SHARED_FRAG|preserve.*shared.frag')
+fi
 JSON_FIELDS[patch_fragnesia]="$PATCH_FRAGNESIA"
 
 # Print patch status with mitigation-removal advice
@@ -321,6 +581,8 @@ if [[ "$MODE" != "json" ]]; then
     _patch_line "CVE-2026-31431 (Copy Fail) " "$PATCH_COPYFAIL" "/etc/modprobe.d/disable-algif.conf"
     _patch_line "CVE-2026-43284/43500 (Dirty Frag)" "$PATCH_DIRTYFRAG" "/etc/modprobe.d/dirtyfrag.conf"
     _patch_line "CVE-2026-46300 (Fragnesia)  " "$PATCH_FRAGNESIA" "/etc/modprobe.d/fragnesia.conf"
+    # CrackArmor patch status is shown inline in section [4/4] via apparmor fs + pkg versions
+    info "CVE-2026-23268..411 (CrackArmor): see [4/4] section above for per-component status"
 
     # Fragnesia & Dirty Frag share modules – warn if only one is patched
     if [[ "$PATCH_DIRTYFRAG" == "patched" && "$PATCH_FRAGNESIA" != "patched" ]]; then
@@ -404,6 +666,8 @@ if [[ "$MODE" == "json" ]]; then
     printf '  "CVE_2026_31431_copyfail": "%s",\n'  "${JSON_FIELDS[copyfail]}"
     printf '  "CVE_2026_43284_dirtyfrag": "%s",\n' "${JSON_FIELDS[dirtyfrag]}"
     printf '  "CVE_2026_46300_fragnesia": "%s",\n' "${JSON_FIELDS[fragnesia]}"
+    printf '  "CVE_2026_23268_crackarmor": "%s",\n' "${JSON_FIELDS[crackarmor]:-unknown}"
+    printf '  "crackarmor_apparmor": "%s",\n'       "${JSON_FIELDS[crackarmor_apparmor]:-unknown}"
     printf '  "patch_copyfail": "%s",\n'            "${JSON_FIELDS[patch_copyfail]:-unknown}"
     printf '  "patch_dirtyfrag": "%s",\n'           "${JSON_FIELDS[patch_dirtyfrag]:-unknown}"
     printf '  "patch_fragnesia": "%s",\n'           "${JSON_FIELDS[patch_fragnesia]:-unknown}"
@@ -433,4 +697,9 @@ echo    "  5. Fragnesia – PoC / advisory:"
 echo    "       https://github.com/v12-security/pocs/tree/main/fragnesia"
 echo    "       https://almalinux.org/blog/2026-05-13-fragnesia-cve-2026-46300/"
 echo    "       https://blog.cloudlinux.com/fragnesia-mitigation-and-kernel-update"
+echo    ""
+echo    "  6. CrackArmor – advisory (no modprobe mitigation – patch only):"
+echo    "       https://ubuntu.com/security/vulnerabilities/crackarmor"
+echo    "       https://blog.qualys.com/vulnerabilities-threat-research/2026/03/12/crackarmor-critical-apparmor-flaws-enable-local-privilege-escalation-to-root"
+echo    "       apt update && apt install util-linux login sudo"
 echo -e "${BOLD}============================================================${RESET}\n"
