@@ -79,10 +79,10 @@ COPYFAIL_STATUS="ok"
 
 # 1a. Module loaded right now?
 if lsmod 2>/dev/null | grep -q "^algif_aead"; then
-    warn "algif_aead ist aktuell GELADEN – Angriffsfläche aktiv"
+    warn "algif_aead is currently LOADED – attack surface active"
     COPYFAIL_STATUS="vulnerable"
 else
-    ok "algif_aead ist nicht geladen"
+    ok "algif_aead is not loaded"
 fi
 
 # 1b. Built-in or module in running kernel config?
@@ -91,35 +91,35 @@ if [[ -f "$KCONF" ]]; then
     CF_AEAD=$(grep "^CONFIG_CRYPTO_USER_API_AEAD" "$KCONF" 2>/dev/null || echo "not_found")
     case "$CF_AEAD" in
         *"=y")
-            warn "algif_aead ist BUILT-IN (=y) – modprobe.d-Blacklist wirkungslos!"
-            info "  → Workaround: initcall_blacklist=algif_aead_init via GRUB/grubby"
+            warn "algif_aead is BUILT-IN (=y) – modprobe.d blacklist has no effect!"
+            info "  → Workaround: add initcall_blacklist=algif_aead_init to GRUB_CMDLINE_LINUX"
             COPYFAIL_STATUS="vulnerable_builtin"
             ;;
         *"=m")
-            info "algif_aead als Modul (=m) – modprobe.d-Blacklist greift"
+            info "algif_aead is a module (=m) – modprobe.d blacklist is effective"
             ;;
         *)
-            info "CONFIG_CRYPTO_USER_API_AEAD nicht gefunden in $KCONF"
+            info "CONFIG_CRYPTO_USER_API_AEAD not found in $KCONF"
             ;;
     esac
 else
-    info "Kernel-Config nicht lesbar ($KCONF)"
+    info "Kernel config not readable ($KCONF)"
 fi
 
 # 1c. modprobe.d mitigation set?
 if grep -rl "algif_aead" /etc/modprobe.d/ 2>/dev/null | grep -q .; then
-    ok "modprobe.d-Mitigation für algif_aead ist gesetzt"
+    ok "modprobe.d mitigation for algif_aead is in place"
     COPYFAIL_STATUS="${COPYFAIL_STATUS}_mitigated"
 else
-    miss "Keine modprobe.d-Mitigation für algif_aead gefunden"
+    miss "No modprobe.d mitigation found for algif_aead"
 fi
 
 # 1d. AF_ALG sockets in use?
 if command -v lsof &>/dev/null && lsof 2>/dev/null | grep -q "AF_ALG"; then
-    warn "AF_ALG Sockets aktiv – prüfe welche Prozesse sie nutzen:"
+    warn "AF_ALG sockets are active – check which processes are using them:"
     info "  → lsof | grep AF_ALG"
 else
-    ok "Keine aktiven AF_ALG Sockets"
+    ok "No active AF_ALG sockets"
 fi
 
 JSON_FIELDS[copyfail]="$COPYFAIL_STATUS"
@@ -132,20 +132,20 @@ LOADED_MODS=()
 
 for mod in esp4 esp6 rxrpc; do
     if lsmod 2>/dev/null | grep -q "^${mod}[[:space:]]"; then
-        warn "${mod} ist geladen – Dirty Frag Angriffsfläche aktiv"
+        warn "${mod} is loaded – Dirty Frag attack surface active"
         LOADED_MODS+=("$mod")
         DIRTYFRAG_STATUS="vulnerable"
     else
-        ok "${mod} ist nicht geladen"
+        ok "${mod} is not loaded"
     fi
 done
 
 # Mitigation file present?
 if [[ -f /etc/modprobe.d/dirtyfrag.conf ]]; then
-    ok "/etc/modprobe.d/dirtyfrag.conf Mitigation vorhanden"
+    ok "/etc/modprobe.d/dirtyfrag.conf mitigation is in place"
     DIRTYFRAG_STATUS="${DIRTYFRAG_STATUS}_mitigated"
 else
-    miss "Keine Dirty Frag modprobe.d-Mitigation gefunden (/etc/modprobe.d/dirtyfrag.conf)"
+    miss "No Dirty Frag modprobe.d mitigation found (/etc/modprobe.d/dirtyfrag.conf)"
 fi
 
 # IPsec / OpenVPN warning
@@ -154,8 +154,8 @@ if systemctl is-active --quiet 'openvpn*' 2>/dev/null || \
    systemctl is-active --quiet 'openvpn@*' 2>/dev/null || \
    systemctl is-active --quiet strongswan 2>/dev/null || \
    (command -v ip &>/dev/null && ip xfrm state list 2>/dev/null | grep -q "src"); then
-    warn "IPsec oder OpenVPN erkannt – Deaktivierung von esp4/esp6 kann VPN-Funktion beeinträchtigen!"
-    info "  OpenVPN (UDP/TLS) benötigt esp4/esp6 i.d.R. NICHT – prüfen und testen"
+    warn "IPsec or OpenVPN detected – disabling esp4/esp6 may break VPN functionality!"
+    info "  OpenVPN (UDP/TLS) does NOT require esp4/esp6 – verify and test after mitigation"
     IPSEC_ACTIVE=true
 fi
 
@@ -175,13 +175,13 @@ FRAGNESIA_STATUS="ok"
 
 # 3a. Dirty Frag mitigation file covers Fragnesia too (same modules)
 if [[ -f /etc/modprobe.d/fragnesia.conf ]]; then
-    ok "/etc/modprobe.d/fragnesia.conf vorhanden (dedizierte Fragnesia-Mitigation)"
+    ok "/etc/modprobe.d/fragnesia.conf present (dedicated Fragnesia mitigation)"
     FRAGNESIA_STATUS="mitigated_dedicated"
 elif [[ -f /etc/modprobe.d/dirtyfrag.conf ]]; then
-    ok "/etc/modprobe.d/dirtyfrag.conf deckt Fragnesia ab (gleiche Module: esp4/esp6/rxrpc)"
+    ok "/etc/modprobe.d/dirtyfrag.conf covers Fragnesia (same modules: esp4/esp6/rxrpc)"
     FRAGNESIA_STATUS="mitigated_via_dirtyfrag"
 else
-    miss "Keine modprobe.d-Mitigation für Fragnesia gefunden"
+    miss "No modprobe.d mitigation found for Fragnesia"
     FRAGNESIA_STATUS="not_mitigated"
 fi
 
@@ -189,42 +189,33 @@ fi
 FRAGNESIA_LOADED=()
 for mod in esp4 esp6 rxrpc; do
     if lsmod 2>/dev/null | grep -q "^${mod}[[:space:]]"; then
-        warn "${mod} ist geladen – Fragnesia Angriffsfläche aktiv!"
+        warn "${mod} is loaded – Fragnesia attack surface active!"
         FRAGNESIA_LOADED+=("$mod")
         FRAGNESIA_STATUS="vulnerable"
     fi
 done
 if [[ ${#FRAGNESIA_LOADED[@]} -eq 0 ]]; then
-    ok "Keine Fragnesia-relevanten Module geladen (esp4, esp6, rxrpc)"
+    ok "No Fragnesia-relevant modules loaded (esp4, esp6, rxrpc)"
 fi
 
 # 3c. ESP-in-TCP ULP activity (Fragnesia-specific trigger path)
 if command -v ss &>/dev/null && ss --tcp --no-header 2>/dev/null | grep -qi "espintcp"; then
-    warn "espintcp ULP Sockets aktiv – direkter Fragnesia-Triggerpfad erkannt!"
+    warn "espintcp ULP sockets are active – direct Fragnesia trigger path detected!"
     info "  → ss -tnp | grep espintcp"
     FRAGNESIA_STATUS="vulnerable_active"
 else
-    ok "Keine aktiven espintcp ULP Sockets"
+    ok "No active espintcp ULP sockets"
 fi
 
 # 3d. Page-cache integrity: check /usr/bin/su against package database
 if command -v dpkg &>/dev/null; then
     SU_VERIFY=$(dpkg --verify login 2>/dev/null | grep "usr/bin/su" || true)
     if [[ -n "$SU_VERIFY" ]]; then
-        warn "/usr/bin/su Checksumme weicht vom Paket ab – mögliche Page-Cache-Korruption!"
+        warn "/usr/bin/su checksum mismatch – possible page-cache corruption (PoC exploit)!"
         info "  → dpkg --verify login"
         FRAGNESIA_STATUS="${FRAGNESIA_STATUS}_su_tampered"
     else
-        ok "/usr/bin/su Checksumme stimmt mit Paket überein (kein Hinweis auf PoC-Exploit)"
-    fi
-elif command -v rpm &>/dev/null; then
-    SU_VERIFY=$(rpm -V shadow-utils util-linux 2>/dev/null | grep "su$" || true)
-    if [[ -n "$SU_VERIFY" ]]; then
-        warn "/usr/bin/su Checksumme weicht vom RPM ab – mögliche Page-Cache-Korruption!"
-        info "  → rpm -V shadow-utils util-linux"
-        FRAGNESIA_STATUS="${FRAGNESIA_STATUS}_su_tampered"
-    else
-        ok "/usr/bin/su Checksumme stimmt mit RPM überein (kein Hinweis auf PoC-Exploit)"
+        ok "/usr/bin/su checksum matches package (no evidence of PoC exploit)"
     fi
 fi
 
@@ -287,11 +278,11 @@ kernel_changelog_check() {
 }
 
 if [[ "$MODE" != "json" ]]; then
-    echo -e "\n${BOLD}[Patch-Status] Kernel: $(uname -r)${RESET}"
+    echo -e "\n${BOLD}[Patch Status] Kernel: $(uname -r)${RESET}"
     if [[ -f "/boot/vmlinuz-$(uname -r)" ]]; then
-        info "Build-Datum: $(stat -c '%y' "/boot/vmlinuz-$(uname -r)" | cut -d' ' -f1)"
+        info "Build date: $(stat -c '%y' "/boot/vmlinuz-$(uname -r)" | cut -d' ' -f1)"
     fi
-    info "Prüfe Kernel-Changelogs auf CVE-Fixes (kann einen Moment dauern)..."
+    info "Checking kernel changelogs for CVE fixes (may take a moment)..."
 fi
 
 # CVE-2026-31431 – Copy Fail
@@ -312,17 +303,17 @@ if [[ "$MODE" != "json" ]]; then
         local cve="$1" status="$2" mitfile="$3"
         case "$status" in
             patched)
-                ok "${cve}: Kernel-Fix installiert"
+                ok "${cve}: kernel fix installed"
                 if [[ -n "$mitfile" && -f "$mitfile" ]]; then
-                    info "  → Mitigation kann entfernt werden:"
+                    info "  → Mitigation can be removed:"
                     info "    sudo rm ${mitfile} && sudo update-initramfs -u && sudo reboot"
                 fi
                 ;;
             not_patched)
-                warn "${cve}: Kein Kernel-Fix im Changelog – Mitigation BEHALTEN"
+                warn "${cve}: no kernel fix found in changelog – keep mitigation in place"
                 ;;
             unknown)
-                miss "${cve}: Changelog nicht lesbar – Patch-Status unklar (Mitigation behalten)"
+                miss "${cve}: changelog not readable – patch status unknown (keep mitigation)"
                 ;;
         esac
     }
@@ -333,51 +324,51 @@ if [[ "$MODE" != "json" ]]; then
 
     # Fragnesia & Dirty Frag share modules – warn if only one is patched
     if [[ "$PATCH_DIRTYFRAG" == "patched" && "$PATCH_FRAGNESIA" != "patched" ]]; then
-        warn "Dirty Frag gepatcht, Fragnesia noch nicht → esp4/esp6/rxrpc-Blacklist BEHALTEN"
+        warn "Dirty Frag patched but Fragnesia is not yet – keep esp4/esp6/rxrpc blacklist"
     fi
 
     # Show available kernel updates
     AVAIL=$(apt list --upgradable 2>/dev/null | grep -i "linux-image" || true)
     if [[ -n "$AVAIL" ]]; then
-        warn "Neuerer Kernel via apt verfügbar – Update empfohlen:"
+        warn "Newer kernel available via apt – update recommended:"
         echo "$AVAIL" | while read -r line; do info "    $line"; done
     else
-        ok "Kein neuerer Kernel via apt verfügbar (bereits aktuell)"
+        ok "No newer kernel available via apt (already up to date)"
     fi
 
     # Ubuntu Pro hint
     if command -v pro &>/dev/null; then
-        info "Ubuntu Pro: sudo pro fix CVE-2026-31431  (Livepatch-Status prüfen)"
+        info "Ubuntu Pro: sudo pro fix CVE-2026-31431  (check livepatch status)"
     fi
 fi
 
 # ── Apply mitigations (--fix mode) ───────────────────────────────────────────
 if [[ "$MODE" == "fix" ]]; then
-    echo -e "\n${BOLD}[--fix] Wende Mitigationen an...${RESET}"
+    echo -e "\n${BOLD}[--fix] Applying mitigations...${RESET}"
 
     if [[ "$(id -u)" -ne 0 ]]; then
-        echo -e "${RED}Fehler: --fix benötigt root-Rechte (sudo check-cve-2026 --fix)${RESET}"
+        echo -e "${RED}Error: --fix requires root privileges (sudo check-cve --fix)${RESET}"
         exit 1
     fi
 
-    # Copy Fail mitigation (only useful if module-based)
+    # Copy Fail mitigation (only effective if module-based, not built-in)
     if [[ "${CF_AEAD:-}" != *"=y"* ]]; then
         echo "install algif_aead /bin/false" > /etc/modprobe.d/disable-algif.conf
         rmmod algif_aead 2>/dev/null || true
-        ok "algif_aead blacklist gesetzt (/etc/modprobe.d/disable-algif.conf)"
+        ok "algif_aead blacklist set (/etc/modprobe.d/disable-algif.conf)"
     else
-        warn "algif_aead ist built-in – modprobe.d-Fix übersprungen (manuell via GRUB nötig)"
-        info "  Füge 'initcall_blacklist=algif_aead_init' in GRUB_CMDLINE_LINUX ein"
-        info "  Danach: sudo update-grub && sudo reboot"
+        warn "algif_aead is built-in – modprobe.d fix skipped (manual GRUB config required)"
+        info "  Add 'initcall_blacklist=algif_aead_init' to GRUB_CMDLINE_LINUX"
+        info "  Then run: sudo update-grub && sudo reboot"
     fi
 
     # Dirty Frag mitigation
     printf 'install esp4 /bin/false\ninstall esp6 /bin/false\ninstall rxrpc /bin/false\n' \
         > /etc/modprobe.d/dirtyfrag.conf
     rmmod esp4 esp6 rxrpc 2>/dev/null || true
-    ok "Dirty Frag modprobe.d-Blacklist gesetzt (/etc/modprobe.d/dirtyfrag.conf)"
+    ok "Dirty Frag modprobe.d blacklist set (/etc/modprobe.d/dirtyfrag.conf)"
 
-    # Fragnesia mitigation (same modules — link to dirtyfrag.conf or create dedicated)
+    # Fragnesia mitigation (same modules – create dedicated file for auditability)
     if [[ ! -f /etc/modprobe.d/fragnesia.conf ]]; then
         printf '# CVE-2026-46300 Fragnesia – same surface as Dirty Frag\n' \
             > /etc/modprobe.d/fragnesia.conf
@@ -385,19 +376,18 @@ if [[ "$MODE" == "fix" ]]; then
             >> /etc/modprobe.d/fragnesia.conf
         printf 'install esp4 /bin/false\ninstall esp6 /bin/false\ninstall rxrpc /bin/false\n' \
             >> /etc/modprobe.d/fragnesia.conf
-        ok "Fragnesia dedizierte Mitigation gesetzt (/etc/modprobe.d/fragnesia.conf)"
+        ok "Fragnesia dedicated mitigation set (/etc/modprobe.d/fragnesia.conf)"
     else
-        ok "Fragnesia-Mitigation bereits vorhanden (/etc/modprobe.d/fragnesia.conf)"
+        ok "Fragnesia mitigation already present (/etc/modprobe.d/fragnesia.conf)"
     fi
 
     if [[ "$IPSEC_ACTIVE" == "true" ]]; then
-        warn "IPsec/VPN erkannt – esp4/esp6 sind jetzt deaktiviert. VPN-Funktion testen!"
+        warn "IPsec/VPN detected – esp4/esp6 are now disabled. Verify VPN functionality!"
     fi
 
-    echo -e "\n${YELLOW}Hinweis: Mitigationen sind aktiv, aber kein Ersatz für Kernel-Updates.${RESET}"
-    echo    "  System updaten: apt update && apt full-upgrade && reboot"
-    echo    "  Nach Kernel-Update: check-cve erneut ausführen – bei 'patched' kann"
-    echo    "  die Mitigation entfernt und der Kernel neu gebootet werden."
+    echo -e "\n${YELLOW}Note: mitigations are active but not a substitute for kernel updates.${RESET}"
+    echo    "  Update system: apt update && apt full-upgrade && reboot"
+    echo    "  After reboot: re-run check-cve – if 'patched', mitigations can be removed."
 fi
 
 # ── JSON output (--json mode) ─────────────────────────────────────────────────
@@ -424,22 +414,22 @@ fi
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo -e "\n${BOLD}============================================================${RESET}"
-echo -e "${BOLD} Empfehlungen${RESET}"
+echo -e "${BOLD} Recommendations${RESET}"
 echo -e "${BOLD}------------------------------------------------------------${RESET}"
-echo    "  1. System patchen (höchste Priorität):"
+echo    "  1. Patch the system (highest priority):"
 echo    "       apt update && apt full-upgrade && reboot"
 echo    ""
-echo    "  2. Sofort-Mitigation anwenden (falls noch ungepatcht):"
+echo    "  2. Apply immediate mitigations (if not yet patched):"
 echo    "       sudo check-cve --fix"
 echo    ""
-echo    "  3. Copy Fail PoC / Info:"
+echo    "  3. Copy Fail – PoC / advisory:"
 echo    "       https://ubuntu.com/blog/copy-fail-vulnerability-fixes-available"
 echo    ""
-echo    "  4. Dirty Frag PoC / Info:"
+echo    "  4. Dirty Frag – PoC / advisory:"
 echo    "       https://github.com/V4bel/dirtyfrag"
 echo    "       https://www.wiz.io/blog/dirty-frag-linux-kernel-local-privilege-escalation-via-esp-and-rxrpc"
 echo    ""
-echo    "  5. Fragnesia PoC / Info:"
+echo    "  5. Fragnesia – PoC / advisory:"
 echo    "       https://github.com/v12-security/pocs/tree/main/fragnesia"
 echo    "       https://almalinux.org/blog/2026-05-13-fragnesia-cve-2026-46300/"
 echo    "       https://blog.cloudlinux.com/fragnesia-mitigation-and-kernel-update"
