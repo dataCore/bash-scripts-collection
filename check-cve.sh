@@ -62,6 +62,10 @@ miss() { echo -e "  ${YELLOW}[MISS]${RESET} $*"; }
 # Collect JSON results
 declare -A JSON_FIELDS
 
+# Detect distro early – needed by both CrackArmor and Patch-Status sections
+_DISTRO_ID=$(grep "^ID=" /etc/os-release 2>/dev/null | cut -d= -f2 | tr -d '"')
+_DISTRO_VER=$(grep "^VERSION_CODENAME=" /etc/os-release 2>/dev/null | cut -d= -f2 | tr -d '"')
+
 # ── Header ────────────────────────────────────────────────────────────────────
 if [[ "$MODE" != "json" ]]; then
     echo -e "${BOLD}============================================================${RESET}"
@@ -469,10 +473,6 @@ kernel_patch_check() {
 
     echo "not_patched"
 }
-
-# Detect distro family to pick the right fixed version
-_DISTRO_ID=$(grep "^ID=" /etc/os-release 2>/dev/null | cut -d= -f2 | tr -d '"')
-_DISTRO_VER=$(grep "^VERSION_CODENAME=" /etc/os-release 2>/dev/null | cut -d= -f2 | tr -d '"')
 
 # Select fixed versions based on distro/release
 case "${_DISTRO_ID}:${_DISTRO_VER}" in
