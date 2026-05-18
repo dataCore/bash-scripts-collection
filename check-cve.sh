@@ -9,6 +9,7 @@
 #   CVE-2026-43500  "Dirty Frag"  – rxrpc subsystem
 #   CVE-2026-46300  "Fragnesia"   – XFRM ESP-in-TCP (skb_try_coalesce / shared-frag marker)
 #   CVE-2026-23268..23411 "CrackArmor" – AppArmor confused-deputy LPE (kernel + util-linux)
+#   CVE-2026-46333  "ptrace mm-NULL" – ptrace_may_access bypass → SSH key + shadow theft
 #
 # Usage:
 #   check-cve            # interactive output
@@ -24,6 +25,8 @@
 #   https://blog.cloudlinux.com/fragnesia-mitigation-and-kernel-update
 #   https://ubuntu.com/security/vulnerabilities/crackarmor
 #   https://blog.qualys.com/vulnerabilities-threat-research/2026/03/12/crackarmor-critical-apparmor-flaws-enable-local-privilege-escalation-to-root
+#   https://security-tracker.debian.org/tracker/CVE-2026-46333
+#   https://github.com/0xdeadbeefnetwork/ssh-keysign-pwn
 # =============================================================================
 
 set -euo pipefail
@@ -253,7 +256,7 @@ JSON_FIELDS[fragnesia]="$FRAGNESIA_STATUS"
 # No modprobe.d-style mitigation exists. Patch is the only reliable fix.
 # Disabling AppArmor entirely would be counterproductive and is NOT recommended.
 
-[[ "$MODE" != "json" ]] && echo -e "\n${BOLD}[4/4] CVE-2026-23268..23411 – \"CrackArmor\" (AppArmor / confused-deputy LPE)${RESET}"
+[[ "$MODE" != "json" ]] && echo -e "\n${BOLD}[4/5] CVE-2026-23268..23411 – \"CrackArmor\" (AppArmor / confused-deputy LPE)${RESET}"
 
 CRACKARMOR_STATUS="ok"
 CRACKARMOR_APPARMOR="inactive"
@@ -348,6 +351,50 @@ fi
 
 JSON_FIELDS[crackarmor]="$CRACKARMOR_STATUS"
 JSON_FIELDS[crackarmor_apparmor]="$CRACKARMOR_APPARMOR"
+
+# ── CVE-2026-46333 – ptrace mm-NULL bypass ────────────────────────────────────
+# ptrace_may_access() evaluates the 'dumpability' flag even for threads with a
+# NULL mm pointer (kernel threads, zombies). A local unprivileged user can use
+# this together with pidfd_getfd() to inherit open file descriptors from
+# privileged processes (e.g. ssh-keysign, sshd) and exfiltrate:
+#   - SSH host private keys (via ssh-keysign file descriptors)
+#   - /etc/shadow contents
+# Public PoC available: github.com/0xdeadbeefnetwork/ssh-keysign-pwn
+# Fix: commit 31e62c2ebbfd – require CAP_SYS_PTRACE for mm-NULL threads.
+# No modprobe.d mitigation. Patch (kernel update) is the only fix.
+# DSA-6275-1 (bookworm), DSA-6274-1 (trixie), DLA-4587-1 (bullseye).
+[[ "$MODE" != "json" ]] && echo -e "\n${BOLD}[5/5] CVE-2026-46333 – ptrace mm-NULL bypass (ssh-keysign / shadow theft)${RESET}"
+
+PTRACE_STATUS="ok"
+
+# 5a. Check if ssh-keysign is installed (primary attack vector)
+if [[ -f /usr/lib/openssh/ssh-keysign ]] || [[ -f /usr/libexec/openssh/ssh-keysign ]]; then
+    info "ssh-keysign is installed – attack vector present"
+    PTRACE_STATUS="exposed"
+else
+    ok "ssh-keysign not found – primary PoC attack vector not present"
+fi
+
+# 5b. Check if sshd is running (secondary indicator)
+if systemctl is-active --quiet ssh 2>/dev/null || systemctl is-active --quiet sshd 2>/dev/null; then
+    info "sshd is running – SSH host keys are in scope"
+fi
+
+# 5c. Check /etc/shadow readability as indicator of exploit success
+#     (readable by root only; world-readable would indicate compromise)
+if [[ -f /etc/shadow ]]; then
+    SHADOW_PERMS=$(stat -c '%a' /etc/shadow 2>/dev/null || echo "unknown")
+    if [[ "$SHADOW_PERMS" =~ ^[0-9]*[1-7]$ ]]; then
+        warn "/etc/shadow has unexpected permissions (${SHADOW_PERMS}) – possible tampering!"
+    else
+        ok "/etc/shadow permissions look correct (${SHADOW_PERMS})"
+    fi
+fi
+
+[[ "$MODE" != "json" ]] && info "PoC: https://github.com/0xdeadbeefnetwork/ssh-keysign-pwn"
+[[ "$MODE" != "json" ]] && info "DSA: https://security-tracker.debian.org/tracker/CVE-2026-46333"
+
+JSON_FIELDS[ptrace_mmnull]="$PTRACE_STATUS"
 # Strategy (Debian/Ubuntu):
 #
 # 1. Version comparison against known-fixed package versions (primary, no network).
@@ -377,7 +424,14 @@ JSON_FIELDS[crackarmor_apparmor]="$CRACKARMOR_APPARMOR"
 #
 #   CVE-2026-23268..23411 (CrackArmor):
 #     Kernel fix committed upstream (7.0-rc4); check done via apparmor fs
-#     permissions and util-linux/sudo package version – see section [4/4].
+#     permissions and util-linux/sudo package version – see section [4/5].
+#
+#   CVE-2026-46333 (ptrace mm-NULL):
+#     Debian 12 bookworm:  linux 6.1.172-1   (DSA-6275-1)
+#     Debian 13 trixie:    linux 6.12.88-1   (DSA-6274-1)
+#     Debian 11 bullseye:  linux 5.10.251-5  (DLA-4587-1)
+#     Ubuntu 24.04 noble:  linux 6.8.0-63.66 (USN-XXXX)
+#     Ubuntu 22.04 jammy:  linux 5.15.0-142.152
 #
 # Sources: security-tracker.debian.org, ubuntu.com/security, ostechnix.com
 
@@ -478,39 +532,45 @@ kernel_patch_check() {
 case "${_DISTRO_ID}:${_DISTRO_VER}" in
     debian:bookworm)
         FIXED_COPYFAIL="6.1.170-1"
-        FIXED_DIRTYFRAG="none"   # not yet patched in bookworm stable
-        FIXED_FRAGNESIA="none"   # not yet patched
+        FIXED_DIRTYFRAG="none"
+        FIXED_FRAGNESIA="none"
+        FIXED_PTRACE="6.1.172-1"    # DSA-6275-1
         ;;
     debian:trixie|debian:forky)
         FIXED_COPYFAIL="6.12.85-1"
         FIXED_DIRTYFRAG="none"
         FIXED_FRAGNESIA="none"
+        FIXED_PTRACE="6.12.88-1"    # DSA-6274-1
         ;;
     debian:sid|debian:unstable)
         FIXED_COPYFAIL="7.0.3-1"
         FIXED_DIRTYFRAG="7.0.4-1"
-        FIXED_FRAGNESIA="none"   # patch pending as of 2026-05-14
+        FIXED_FRAGNESIA="none"
+        FIXED_PTRACE="7.0.7-1"
         ;;
-    ubuntu:noble)             # 24.04 LTS
+    ubuntu:noble)
         FIXED_COPYFAIL="6.8.0-60.62"
         FIXED_DIRTYFRAG="none"
         FIXED_FRAGNESIA="none"
+        FIXED_PTRACE="6.8.0-63.66"
         ;;
-    ubuntu:jammy)             # 22.04 LTS
+    ubuntu:jammy)
         FIXED_COPYFAIL="5.15.0-140.150"
         FIXED_DIRTYFRAG="none"
         FIXED_FRAGNESIA="none"
+        FIXED_PTRACE="5.15.0-142.152"
         ;;
-    ubuntu:focal)             # 20.04 LTS
+    ubuntu:focal)
         FIXED_COPYFAIL="5.4.0-220.240"
         FIXED_DIRTYFRAG="none"
         FIXED_FRAGNESIA="none"
+        FIXED_PTRACE="5.4.0-222.242"
         ;;
     *)
-        # Unknown release – fall back to changelog grep only (no version anchor)
         FIXED_COPYFAIL=""
         FIXED_DIRTYFRAG=""
         FIXED_FRAGNESIA=""
+        FIXED_PTRACE=""
         ;;
 esac
 
@@ -557,6 +617,17 @@ else
 fi
 JSON_FIELDS[patch_fragnesia]="$PATCH_FRAGNESIA"
 
+# CVE-2026-46333 – ptrace mm-NULL bypass
+# Upstream commit: 31e62c2ebbfd
+if [[ -n "$FIXED_PTRACE" ]]; then
+    PATCH_PTRACE=$(kernel_patch_check "$FIXED_PTRACE" \
+        '31e62c2ebbfd|CVE-2026-46333|ptrace.*mm.*NULL|get_dumpable.*CAP_SYS_PTRACE|saner.*dumpable')
+else
+    PATCH_PTRACE=$(kernel_patch_check "none" \
+        '31e62c2ebbfd|CVE-2026-46333|ptrace.*mm.*NULL|get_dumpable.*CAP_SYS_PTRACE|saner.*dumpable')
+fi
+JSON_FIELDS[patch_ptrace]="$PATCH_PTRACE"
+
 # Print patch status with mitigation-removal advice
 if [[ "$MODE" != "json" ]]; then
     _patch_line() {
@@ -581,8 +652,8 @@ if [[ "$MODE" != "json" ]]; then
     _patch_line "CVE-2026-31431 (Copy Fail) " "$PATCH_COPYFAIL" "/etc/modprobe.d/disable-algif.conf"
     _patch_line "CVE-2026-43284/43500 (Dirty Frag)" "$PATCH_DIRTYFRAG" "/etc/modprobe.d/dirtyfrag.conf"
     _patch_line "CVE-2026-46300 (Fragnesia)  " "$PATCH_FRAGNESIA" "/etc/modprobe.d/fragnesia.conf"
-    # CrackArmor patch status is shown inline in section [4/4] via apparmor fs + pkg versions
-    info "CVE-2026-23268..411 (CrackArmor): see [4/4] section above for per-component status"
+    _patch_line "CVE-2026-46333 (ptrace mm-NULL)" "$PATCH_PTRACE" ""
+    info "CVE-2026-23268..411 (CrackArmor): see [4/5] section above for per-component status"
 
     # Fragnesia & Dirty Frag share modules – warn if only one is patched
     if [[ "$PATCH_DIRTYFRAG" == "patched" && "$PATCH_FRAGNESIA" != "patched" ]]; then
@@ -667,11 +738,13 @@ if [[ "$MODE" == "json" ]]; then
     printf '  "CVE_2026_43284_dirtyfrag": "%s",\n' "${JSON_FIELDS[dirtyfrag]}"
     printf '  "CVE_2026_46300_fragnesia": "%s",\n' "${JSON_FIELDS[fragnesia]}"
     printf '  "CVE_2026_23268_crackarmor": "%s",\n' "${JSON_FIELDS[crackarmor]:-unknown}"
-    printf '  "crackarmor_apparmor": "%s",\n'       "${JSON_FIELDS[crackarmor_apparmor]:-unknown}"
-    printf '  "patch_copyfail": "%s",\n'            "${JSON_FIELDS[patch_copyfail]:-unknown}"
-    printf '  "patch_dirtyfrag": "%s",\n'           "${JSON_FIELDS[patch_dirtyfrag]:-unknown}"
-    printf '  "patch_fragnesia": "%s",\n'           "${JSON_FIELDS[patch_fragnesia]:-unknown}"
-    printf '  "ipsec_active": %s\n'     "${JSON_FIELDS[ipsec_active]}"
+    printf '  "crackarmor_apparmor": "%s",\n'        "${JSON_FIELDS[crackarmor_apparmor]:-unknown}"
+    printf '  "CVE_2026_46333_ptrace": "%s",\n'      "${JSON_FIELDS[ptrace_mmnull]:-unknown}"
+    printf '  "patch_copyfail": "%s",\n'             "${JSON_FIELDS[patch_copyfail]:-unknown}"
+    printf '  "patch_dirtyfrag": "%s",\n'            "${JSON_FIELDS[patch_dirtyfrag]:-unknown}"
+    printf '  "patch_fragnesia": "%s",\n'            "${JSON_FIELDS[patch_fragnesia]:-unknown}"
+    printf '  "patch_ptrace": "%s",\n'               "${JSON_FIELDS[patch_ptrace]:-unknown}"
+    printf '  "ipsec_active": %s\n'      "${JSON_FIELDS[ipsec_active]}"
     printf '}\n'
     exit 0
 fi
@@ -702,4 +775,9 @@ echo    "  6. CrackArmor – advisory (no modprobe mitigation – patch only):"
 echo    "       https://ubuntu.com/security/vulnerabilities/crackarmor"
 echo    "       https://blog.qualys.com/vulnerabilities-threat-research/2026/03/12/crackarmor-critical-apparmor-flaws-enable-local-privilege-escalation-to-root"
 echo    "       apt update && apt install util-linux login sudo"
+echo    ""
+echo    "  7. ptrace mm-NULL bypass – PoC / advisory (patch only):"
+echo    "       https://security-tracker.debian.org/tracker/CVE-2026-46333"
+echo    "       https://github.com/0xdeadbeefnetwork/ssh-keysign-pwn"
+echo    "       DSA-6275-1 (bookworm) / DSA-6274-1 (trixie) / DLA-4587-1 (bullseye)"
 echo -e "${BOLD}============================================================${RESET}\n"
