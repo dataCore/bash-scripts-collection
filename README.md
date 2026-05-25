@@ -73,7 +73,7 @@ bash-scripts-collection/
 ```bash
 # Create folder and clone
 sudo mkdir -p /usr/bin/datacore/bash
-git clone https://code.geek.ch/dataCore/bash-scripts-collection.git /usr/bin/datacore/bash/
+git clone https://github.com/dataCore/bash-scripts-collection.git /usr/bin/datacore/bash/
 
 # Link all scripts to /usr/bin/
 bash /usr/bin/datacore/bash/link.sh
