@@ -481,7 +481,7 @@ step_install_authorized_keys() {
         [[ -z "$line" || "$line" == \#* ]] && continue
 
         local key_blob
-        key_blob=$(awk '{print $2}' <<< "$line")
+        key_blob=$(awk '{print $2}' <<< "$line" | tr -d '\r')
 
         if grep -qF "$key_blob" "$auth_keys" 2>/dev/null; then
             info "Already present, skipping: ${line##* }"   # show comment/label
