@@ -76,6 +76,35 @@ die()  { err "$1"; echo ""; exit 1; }
 # Pre-flight Checks
 # =============================================================================
 
+check_root() {
+    if [[ "$EUID" -ne 0 ]]; then
+        echo ""
+        echo -e "  ${RED}${BOLD}✗  This script must be run as root.${NC}"
+        echo ""
+        echo -e "  ${YELLOW}Fresh Debian installs often have no sudo configured yet —${NC}"
+        echo -e "  ${YELLOW}that is exactly what this script sets up.${NC}"
+        echo ""
+        echo -e "  ${BOLD}How to proceed:${NC}"
+        echo ""
+
+        # Check if sudo is available and user could potentially use it
+        if command -v sudo &>/dev/null && sudo -n true 2>/dev/null; then
+            echo -e "   Option A  ${GREEN}sudo bash $0 $*${NC}"
+            echo ""
+        fi
+
+        # Always show su fallback
+        echo -e "   Option B  ${GREEN}su -${NC}  (enter root password, then re-run)"
+        echo -e "             ${GREEN}bash $0 $*${NC}"
+        echo ""
+
+        # Hint about Proxmox console
+        echo -e "  ${CYAN}Tip:${NC} On a fresh VM, use the Proxmox console to log in as root directly."
+        echo ""
+        exit 1
+    fi
+}
+
 check_username() {
     print_section "Pre-flight Checks"
 
@@ -544,11 +573,13 @@ step_summary() {
 # =============================================================================
 
 main() {
-    # Initialise log
+    print_header
+    check_root "$@"
+
+    # Initialise log (needs root, so after check_root)
     mkdir -p "$(dirname "$LOG_FILE")"
     echo "=== install-ssh.sh === $(date)" >> "$LOG_FILE"
 
-    print_header
     check_username "$@"
 
     step_set_timezone
