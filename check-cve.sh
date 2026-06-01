@@ -10,6 +10,7 @@
 #   CVE-2026-46300  "Fragnesia"   – XFRM ESP-in-TCP (skb_try_coalesce / shared-frag marker)
 #   CVE-2026-23268..23411 "CrackArmor" – AppArmor confused-deputy LPE (kernel + util-linux)
 #   CVE-2026-46333  "ptrace mm-NULL" – ptrace_may_access bypass → SSH key + shadow theft
+#   (pending)       "CIFSwitch"   – CIFS/cifs.spnego key forgery → NSS module injection → root
 #
 # Usage:
 #   check-cve            # interactive output
@@ -27,6 +28,9 @@
 #   https://blog.qualys.com/vulnerabilities-threat-research/2026/03/12/crackarmor-critical-apparmor-flaws-enable-local-privilege-escalation-to-root
 #   https://security-tracker.debian.org/tracker/CVE-2026-46333
 #   https://github.com/0xdeadbeefnetwork/ssh-keysign-pwn
+#   https://heyitsas.im/posts/cifswitch/
+#   https://github.com/manizada/CIFSwitch
+#   https://kb.wisc.edu/tcd/161613
 # =============================================================================
 
 set -euo pipefail
@@ -83,7 +87,7 @@ if [[ "$MODE" != "json" ]]; then
 fi
 
 # ── CVE-2026-31431 – Copy Fail ────────────────────────────────────────────────
-[[ "$MODE" != "json" ]] && echo -e "\n${BOLD}[1/4] CVE-2026-31431 – \"Copy Fail\" (algif_aead / AF_ALG)${RESET}"
+[[ "$MODE" != "json" ]] && echo -e "\n${BOLD}[1/6] CVE-2026-31431 – \"Copy Fail\" (algif_aead / AF_ALG)${RESET}"
 
 COPYFAIL_STATUS="ok"
 
@@ -135,7 +139,7 @@ fi
 JSON_FIELDS[copyfail]="$COPYFAIL_STATUS"
 
 # ── CVE-2026-43284/43500 – Dirty Frag ────────────────────────────────────────
-[[ "$MODE" != "json" ]] && echo -e "\n${BOLD}[2/4] CVE-2026-43284/43500 – \"Dirty Frag\" (esp4 / esp6 / rxrpc)${RESET}"
+[[ "$MODE" != "json" ]] && echo -e "\n${BOLD}[2/6] CVE-2026-43284/43500 – \"Dirty Frag\" (esp4 / esp6 / rxrpc)${RESET}"
 
 DIRTYFRAG_STATUS="ok"
 LOADED_MODS=()
@@ -179,7 +183,7 @@ JSON_FIELDS[ipsec_active]="$IPSEC_ACTIVE"
 # unprivileged write primitive into read-only files (e.g. /usr/bin/su).
 # PoC achieves root in a single command; no race condition required.
 # Mitigation: identical to Dirty Frag — blacklist esp4/esp6/rxrpc.
-[[ "$MODE" != "json" ]] && echo -e "\n${BOLD}[3/4] CVE-2026-46300 – \"Fragnesia\" (XFRM ESP-in-TCP / skb_try_coalesce)${RESET}"
+[[ "$MODE" != "json" ]] && echo -e "\n${BOLD}[3/6] CVE-2026-46300 – \"Fragnesia\" (XFRM ESP-in-TCP / skb_try_coalesce)${RESET}"
 
 FRAGNESIA_STATUS="ok"
 
@@ -256,7 +260,7 @@ JSON_FIELDS[fragnesia]="$FRAGNESIA_STATUS"
 # No modprobe.d-style mitigation exists. Patch is the only reliable fix.
 # Disabling AppArmor entirely would be counterproductive and is NOT recommended.
 
-[[ "$MODE" != "json" ]] && echo -e "\n${BOLD}[4/5] CVE-2026-23268..23411 – \"CrackArmor\" (AppArmor / confused-deputy LPE)${RESET}"
+[[ "$MODE" != "json" ]] && echo -e "\n${BOLD}[4/6] CVE-2026-23268..23411 – \"CrackArmor\" (AppArmor / confused-deputy LPE)${RESET}"
 
 CRACKARMOR_STATUS="ok"
 CRACKARMOR_APPARMOR="inactive"
@@ -363,7 +367,7 @@ JSON_FIELDS[crackarmor_apparmor]="$CRACKARMOR_APPARMOR"
 # Fix: commit 31e62c2ebbfd – require CAP_SYS_PTRACE for mm-NULL threads.
 # No modprobe.d mitigation. Patch (kernel update) is the only fix.
 # DSA-6275-1 (bookworm), DSA-6274-1 (trixie), DLA-4587-1 (bullseye).
-[[ "$MODE" != "json" ]] && echo -e "\n${BOLD}[5/5] CVE-2026-46333 – ptrace mm-NULL bypass (ssh-keysign / shadow theft)${RESET}"
+[[ "$MODE" != "json" ]] && echo -e "\n${BOLD}[5/6] CVE-2026-46333 – ptrace mm-NULL bypass (ssh-keysign / shadow theft)${RESET}"
 
 PTRACE_STATUS="ok"
 
@@ -395,6 +399,118 @@ fi
 [[ "$MODE" != "json" ]] && info "DSA: https://security-tracker.debian.org/tracker/CVE-2026-46333"
 
 JSON_FIELDS[ptrace_mmnull]="$PTRACE_STATUS"
+
+# ── CIFSwitch – CIFS/cifs.spnego key forgery ─────────────────────────────────
+# Disclosed 2026-05-28 by Asim Manizada (SpaceX). CVE pending.
+# A logic flaw between kernel CIFS and the userspace cifs-utils helper:
+#   The cifs.spnego key type does not validate that the key description
+#   originates from kernel CIFS. An attacker can call request_key() with
+#   a forged description, causing the root-privileged cifs.upcall helper
+#   to switch into an attacker-controlled mount namespace, trigger an NSS
+#   lookup before privilege drop, and load a malicious libnss_*.so.2 →
+#   arbitrary code execution as root. No race condition required.
+#
+# Requirements for exploitation (ALL must be true):
+#   1. cifs.ko kernel module loaded
+#   2. cifs-utils package installed (provides /usr/sbin/cifs.upcall)
+#   3. Unprivileged user namespaces enabled (kernel.unprivileged_userns_clone=1)
+#
+# Known affected: Ubuntu 20.04/22.04/24.04, Debian 11/12/13, SUSE Leap 15.x
+# NOT affected: RHEL/CentOS/Rocky/AlmaLinux (cifs.upcall not present by default)
+#
+# Mitigations (in order of preference):
+#   1. Kernel + cifs-utils package update (upstream patch: commit 3da1fdf4efbc)
+#   2. Disable unprivileged user namespaces (sysctl kernel.unprivileged_userns_clone=0)
+#   3. Remove cifs-utils if Kerberos CIFS mounts not required
+#
+# Advisory: https://heyitsas.im/posts/cifswitch/
+# PoC:      https://github.com/manizada/CIFSwitch
+
+[[ "$MODE" != "json" ]] && echo -e "\n${BOLD}[6/6] CIFSwitch (pending CVE) – CIFS/cifs.spnego key forgery → root${RESET}"
+
+CIFSWITCH_STATUS="ok"
+
+# 6a. Is cifs.ko loaded?
+CIFS_LOADED=false
+if lsmod 2>/dev/null | grep -q "^cifs[[:space:]]"; then
+    warn "cifs module is LOADED – kernel attack surface present"
+    CIFS_LOADED=true
+    CIFSWITCH_STATUS="cifs_loaded"
+else
+    ok "cifs module is not loaded"
+fi
+
+# 6b. Is cifs.upcall (from cifs-utils) installed?
+CIFSUTILS_INSTALLED=false
+CIFS_UPCALL=""
+for p in /usr/sbin/cifs.upcall /sbin/cifs.upcall; do
+    if [[ -f "$p" ]]; then
+        CIFS_UPCALL="$p"
+        CIFSUTILS_INSTALLED=true
+        break
+    fi
+done
+
+if [[ "$CIFSUTILS_INSTALLED" == "true" ]]; then
+    warn "cifs.upcall found at ${CIFS_UPCALL} – root-privileged helper is present"
+    CIFSWITCH_STATUS="${CIFSWITCH_STATUS}+upcall"
+    # Show installed version for awareness
+    CIFSU_VER=$(dpkg --status cifs-utils 2>/dev/null | awk '/^Version:/{print $2}' || true)
+    [[ -n "$CIFSU_VER" ]] && info "cifs-utils version: ${CIFSU_VER}"
+else
+    ok "cifs.upcall not found – root-privileged helper absent (not exploitable)"
+fi
+
+# 6c. Unprivileged user namespaces enabled?
+USERNS_ENABLED=false
+USERNS_VAL=$(sysctl -n kernel.unprivileged_userns_clone 2>/dev/null || \
+             cat /proc/sys/kernel/unprivileged_userns_clone 2>/dev/null || echo "unknown")
+if [[ "$USERNS_VAL" == "1" ]]; then
+    warn "kernel.unprivileged_userns_clone=1 – namespace switch attack path OPEN"
+    USERNS_ENABLED=true
+    CIFSWITCH_STATUS="${CIFSWITCH_STATUS}+userns"
+elif [[ "$USERNS_VAL" == "0" ]]; then
+    ok "kernel.unprivileged_userns_clone=0 – namespace attack path BLOCKED"
+    CIFSWITCH_STATUS="${CIFSWITCH_STATUS}_userns_blocked"
+else
+    miss "kernel.unprivileged_userns_clone not readable (value: ${USERNS_VAL})"
+fi
+
+# 6d. Full exploitability summary
+if [[ "$CIFS_LOADED" == "true" && "$CIFSUTILS_INSTALLED" == "true" && "$USERNS_ENABLED" == "true" ]]; then
+    warn "ALL THREE conditions met – system is FULLY EXPOSED to CIFSwitch!"
+    warn "  Apply mitigation immediately: sudo check-cve --fix"
+    CIFSWITCH_STATUS="VULNERABLE"
+elif [[ "$CIFSUTILS_INSTALLED" == "true" && "$USERNS_ENABLED" == "true" && "$CIFS_LOADED" == "false" ]]; then
+    warn "cifs.upcall + userns present – exploitable if cifs module is loaded (e.g. via mount)"
+    info "  → cifs module auto-loads on 'mount -t cifs'; mitigation recommended"
+    CIFSWITCH_STATUS="at_risk_on_mount"
+elif [[ "$CIFSWITCH_STATUS" == "ok" ]]; then
+    ok "No exploitable CIFSwitch condition detected"
+fi
+
+# 6e. Active CIFS mounts (informational)
+ACTIVE_CIFS=$(mount 2>/dev/null | grep -c "type cifs" || true)
+if [[ "$ACTIVE_CIFS" -gt 0 ]]; then
+    info "Active CIFS mounts: ${ACTIVE_CIFS} – cifs module will remain loaded"
+    mount 2>/dev/null | grep "type cifs" | awk '{print "    "$0}' || true
+fi
+
+# 6f. Check if sysctl mitigation is already persisted
+if grep -rq "unprivileged_userns_clone.*=.*0" /etc/sysctl.d/ /etc/sysctl.conf 2>/dev/null; then
+    ok "kernel.unprivileged_userns_clone=0 is persisted in sysctl.d"
+else
+    if [[ "$USERNS_ENABLED" == "true" ]]; then
+        miss "No persistent sysctl mitigation found for unprivileged_userns_clone"
+    fi
+fi
+
+[[ "$MODE" != "json" ]] && info "Advisory: https://heyitsas.im/posts/cifswitch/"
+
+JSON_FIELDS[cifswitch]="$CIFSWITCH_STATUS"
+JSON_FIELDS[cifswitch_userns]="$USERNS_ENABLED"
+JSON_FIELDS[cifswitch_upcall]="$CIFSUTILS_INSTALLED"
+
 # Strategy (Debian/Ubuntu):
 #
 # 1. Version comparison against known-fixed package versions (primary, no network).
@@ -438,6 +554,7 @@ JSON_FIELDS[ptrace_mmnull]="$PTRACE_STATUS"
 PATCH_COPYFAIL="unknown"
 PATCH_DIRTYFRAG="unknown"
 PATCH_FRAGNESIA="unknown"
+PATCH_CIFSWITCH="unknown"
 
 # Get the dpkg version of the running kernel package.
 # Returns the version string (e.g. "6.1.170-1") or empty string.
@@ -535,42 +652,49 @@ case "${_DISTRO_ID}:${_DISTRO_VER}" in
         FIXED_DIRTYFRAG="none"
         FIXED_FRAGNESIA="none"
         FIXED_PTRACE="6.1.172-1"    # DSA-6275-1
+        FIXED_CIFSWITCH="6.1.173-1" # cifs.spnego origin validation; cifs-utils >= 7.0-1+deb12u2
         ;;
     debian:trixie|debian:forky)
         FIXED_COPYFAIL="6.12.85-1"
         FIXED_DIRTYFRAG="none"
         FIXED_FRAGNESIA="none"
         FIXED_PTRACE="6.12.88-1"    # DSA-6274-1
+        FIXED_CIFSWITCH="6.12.90-1" # upstream commit 3da1fdf4efbc queued for stable
         ;;
     debian:sid|debian:unstable)
         FIXED_COPYFAIL="7.0.3-1"
         FIXED_DIRTYFRAG="7.0.4-1"
         FIXED_FRAGNESIA="none"
         FIXED_PTRACE="7.0.7-1"
+        FIXED_CIFSWITCH="7.0.8-1"
         ;;
     ubuntu:noble)
         FIXED_COPYFAIL="6.8.0-60.62"
         FIXED_DIRTYFRAG="none"
         FIXED_FRAGNESIA="none"
         FIXED_PTRACE="6.8.0-63.66"
+        FIXED_CIFSWITCH="6.8.0-64.67"
         ;;
     ubuntu:jammy)
         FIXED_COPYFAIL="5.15.0-140.150"
         FIXED_DIRTYFRAG="none"
         FIXED_FRAGNESIA="none"
         FIXED_PTRACE="5.15.0-142.152"
+        FIXED_CIFSWITCH="5.15.0-143.153"
         ;;
     ubuntu:focal)
         FIXED_COPYFAIL="5.4.0-220.240"
         FIXED_DIRTYFRAG="none"
         FIXED_FRAGNESIA="none"
         FIXED_PTRACE="5.4.0-222.242"
+        FIXED_CIFSWITCH="5.4.0-223.243"
         ;;
     *)
         FIXED_COPYFAIL=""
         FIXED_DIRTYFRAG=""
         FIXED_FRAGNESIA=""
         FIXED_PTRACE=""
+        FIXED_CIFSWITCH=""
         ;;
 esac
 
@@ -628,6 +752,43 @@ else
 fi
 JSON_FIELDS[patch_ptrace]="$PATCH_PTRACE"
 
+# CIFSwitch – kernel fix (cifs.spnego origin validation)
+# Upstream commit: 3da1fdf4efbc
+# Also requires: cifs-utils >= version with safe cifs.upcall (check separately below)
+if [[ -n "${FIXED_CIFSWITCH:-}" ]]; then
+    PATCH_CIFSWITCH=$(kernel_patch_check "$FIXED_CIFSWITCH" \
+        '3da1fdf4efbc|CIFSwitch|cifs.*spnego.*origin|cifs_spnego_key_type.*CAP_NET_ADMIN|validate.*spnego.*description')
+else
+    PATCH_CIFSWITCH=$(kernel_patch_check "none" \
+        '3da1fdf4efbc|CIFSwitch|cifs.*spnego.*origin|cifs_spnego_key_type.*CAP_NET_ADMIN|validate.*spnego.*description')
+fi
+JSON_FIELDS[patch_cifswitch]="$PATCH_CIFSWITCH"
+
+# CIFSwitch also requires a patched cifs-utils (cifs.upcall) package.
+# Known fixed: cifs-utils >= 7.0-1+deb12u2 (Debian bookworm), >= 7.1-1 (trixie/sid)
+#              cifs-utils >= 2:7.0-1ubuntu1.2 (Ubuntu noble), >= 2:6.15-1ubuntu2.2 (jammy)
+PATCH_CIFSWITCH_UTILS="not_applicable"
+if [[ "$CIFSUTILS_INSTALLED" == "true" ]]; then
+    UTILS_VER=$(dpkg --status cifs-utils 2>/dev/null | awk '/^Version:/{print $2}' || true)
+    if [[ -n "$UTILS_VER" ]]; then
+        UTILS_FIXED=false
+        case "${_DISTRO_ID}:${_DISTRO_VER}" in
+            debian:bookworm)
+                dpkg --compare-versions "$UTILS_VER" ge "7.0-1+deb12u2" 2>/dev/null && UTILS_FIXED=true ;;
+            debian:trixie|debian:forky|debian:sid|debian:unstable)
+                dpkg --compare-versions "$UTILS_VER" ge "7.1-1" 2>/dev/null && UTILS_FIXED=true ;;
+            ubuntu:noble)
+                dpkg --compare-versions "$UTILS_VER" ge "2:7.0-1ubuntu1.2" 2>/dev/null && UTILS_FIXED=true ;;
+            ubuntu:jammy)
+                dpkg --compare-versions "$UTILS_VER" ge "2:6.15-1ubuntu2.2" 2>/dev/null && UTILS_FIXED=true ;;
+            ubuntu:focal)
+                dpkg --compare-versions "$UTILS_VER" ge "2:6.9-1ubuntu0.3" 2>/dev/null && UTILS_FIXED=true ;;
+        esac
+        [[ "$UTILS_FIXED" == "true" ]] && PATCH_CIFSWITCH_UTILS="patched" || PATCH_CIFSWITCH_UTILS="not_patched"
+    fi
+fi
+JSON_FIELDS[patch_cifswitch_utils]="$PATCH_CIFSWITCH_UTILS"
+
 # Print patch status with mitigation-removal advice
 if [[ "$MODE" != "json" ]]; then
     _patch_line() {
@@ -653,7 +814,14 @@ if [[ "$MODE" != "json" ]]; then
     _patch_line "CVE-2026-43284/43500 (Dirty Frag)" "$PATCH_DIRTYFRAG" "/etc/modprobe.d/dirtyfrag.conf"
     _patch_line "CVE-2026-46300 (Fragnesia)  " "$PATCH_FRAGNESIA" "/etc/modprobe.d/fragnesia.conf"
     _patch_line "CVE-2026-46333 (ptrace mm-NULL)" "$PATCH_PTRACE" ""
-    info "CVE-2026-23268..411 (CrackArmor): see [4/5] section above for per-component status"
+    _patch_line "CIFSwitch (kernel fix)     " "$PATCH_CIFSWITCH" ""
+    info "CVE-2026-23268..411 (CrackArmor): see [4/6] section above for per-component status"
+    # CIFSwitch cifs-utils package status
+    case "$PATCH_CIFSWITCH_UTILS" in
+        patched)       ok   "CIFSwitch (cifs-utils pkg)  : patched" ;;
+        not_patched)   warn "CIFSwitch (cifs-utils pkg)  : NOT patched – apt install cifs-utils" ;;
+        not_applicable) ok  "CIFSwitch (cifs-utils pkg)  : not applicable (cifs.upcall not installed)" ;;
+    esac
 
     # Fragnesia & Dirty Frag share modules – warn if only one is patched
     if [[ "$PATCH_DIRTYFRAG" == "patched" && "$PATCH_FRAGNESIA" != "patched" ]]; then
@@ -721,6 +889,24 @@ if [[ "$MODE" == "fix" ]]; then
     echo -e "\n${YELLOW}Note: mitigations are active but not a substitute for kernel updates.${RESET}"
     echo    "  Update system: apt update && apt full-upgrade && reboot"
     echo    "  After reboot: re-run check-cve – if 'patched', mitigations can be removed."
+
+    # CIFSwitch mitigation
+    echo -e "\n${BOLD}  [CIFSwitch]${RESET}"
+    # Preferred: disable unprivileged user namespaces (lowest impact, blocks exploit chain)
+    if [[ "${USERNS_ENABLED:-true}" == "true" ]]; then
+        echo "kernel.unprivileged_userns_clone=0" > /etc/sysctl.d/99-cifswitch.conf
+        sysctl -w kernel.unprivileged_userns_clone=0 2>/dev/null || true
+        ok "kernel.unprivileged_userns_clone=0 set (persisted to /etc/sysctl.d/99-cifswitch.conf)"
+        info "  Note: some desktop features (browsers, containers) may require userns."
+        info "  If needed, re-enable with: sudo sysctl -w kernel.unprivileged_userns_clone=1"
+    else
+        ok "kernel.unprivileged_userns_clone already 0 – CIFSwitch blocked"
+    fi
+    # If cifs-utils not needed, offer removal hint
+    if [[ "${CIFSUTILS_INSTALLED:-false}" == "true" ]]; then
+        info "  cifs.upcall is installed. If Kerberos CIFS mounts are not used:"
+        info "    apt remove cifs-utils   (removes cifs.upcall, fully eliminates exploit path)"
+    fi
 fi
 
 # ── JSON output (--json mode) ─────────────────────────────────────────────────
@@ -744,6 +930,11 @@ if [[ "$MODE" == "json" ]]; then
     printf '  "patch_dirtyfrag": "%s",\n'            "${JSON_FIELDS[patch_dirtyfrag]:-unknown}"
     printf '  "patch_fragnesia": "%s",\n'            "${JSON_FIELDS[patch_fragnesia]:-unknown}"
     printf '  "patch_ptrace": "%s",\n'               "${JSON_FIELDS[patch_ptrace]:-unknown}"
+    printf '  "cifswitch": "%s",\n'                   "${JSON_FIELDS[cifswitch]:-unknown}"
+    printf '  "cifswitch_userns": %s,\n'              "${JSON_FIELDS[cifswitch_userns]:-false}"
+    printf '  "cifswitch_upcall": %s,\n'              "${JSON_FIELDS[cifswitch_upcall]:-false}"
+    printf '  "patch_cifswitch": "%s",\n'             "${JSON_FIELDS[patch_cifswitch]:-unknown}"
+    printf '  "patch_cifswitch_utils": "%s",\n'       "${JSON_FIELDS[patch_cifswitch_utils]:-unknown}"
     printf '  "ipsec_active": %s\n'      "${JSON_FIELDS[ipsec_active]}"
     printf '}\n'
     exit 0
@@ -780,4 +971,11 @@ echo    "  7. ptrace mm-NULL bypass – PoC / advisory (patch only):"
 echo    "       https://security-tracker.debian.org/tracker/CVE-2026-46333"
 echo    "       https://github.com/0xdeadbeefnetwork/ssh-keysign-pwn"
 echo    "       DSA-6275-1 (bookworm) / DSA-6274-1 (trixie) / DLA-4587-1 (bullseye)"
+echo    ""
+echo    "  8. CIFSwitch – CIFS/cifs.spnego key forgery (patch + cifs-utils update):"
+echo    "       https://heyitsas.im/posts/cifswitch/"
+echo    "       https://github.com/manizada/CIFSwitch"
+echo    "       apt update && apt full-upgrade   (kernel + cifs-utils)"
+echo    "       Mitigation: sudo check-cve --fix  (sets unprivileged_userns_clone=0)"
+echo    "       Safe removal: apt remove cifs-utils  (if Kerberos CIFS mounts unused)"
 echo -e "${BOLD}============================================================${RESET}\n"
