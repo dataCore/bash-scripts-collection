@@ -28,7 +28,6 @@
 #   --pass <secret>   OpenObserve ingest password (avoid on shared shells)
 #   --vlan <id>       Override auto-detected VLAN
 #   --org <name>      OpenObserve organization (default: default)
-#   --no-verify       Skip credential and log-arrival verification
 #
 # Examples:
 #   install-log.sh --host log.geek.ch --docker
@@ -62,7 +61,6 @@ SCRIPT_DIR="$(cd "$(dirname "$SOURCE")" && pwd)"
 OPT_DOCKER=false
 OPT_PROXMOX=false
 OPT_UNIFI=false
-OPT_NO_VERIFY=false
 
 O2_HOST=""
 O2_USER=""
@@ -112,7 +110,6 @@ parse_args() {
             --docker)    OPT_DOCKER=true; shift ;;
             --proxmox)   OPT_PROXMOX=true; shift ;;
             --unifi)     OPT_UNIFI=true; shift ;;
-            --no-verify) OPT_NO_VERIFY=true; shift ;;
             -h|--help)   usage 0 ;;
             *) die "Unknown argument: $1 (use --help)" ;;
         esac
@@ -371,27 +368,7 @@ step_enable_fluent_bit() {
     fi
 }
 
-# =============================================================================
-# Step 7 — Verify
-# =============================================================================
-step_verify() {
-    $OPT_NO_VERIFY && { info "Skipping log-arrival verification (--no-verify)"; return; }
-    print_section "Verification"
 
-    info "Waiting 10 seconds for first log batch to arrive..."
-    sleep 10
-
-    local http_status
-    http_status=$(curl -s -o /dev/null -w "%{http_code}" \
-        -u "${O2_USER}:${O2_PASSWD}" \
-        "https://${O2_HOST}/api/${O2_ORG}/syslog/_search?query=host:$(hostname)&size=1" || echo "000")
-
-    if [[ "$http_status" == "200" ]]; then
-        ok "Logs confirmed in OpenObserve stream 'syslog'"
-    else
-        warn "Could not confirm logs yet (HTTP ${http_status}) — check https://${O2_HOST} shortly"
-    fi
-}
 
 # =============================================================================
 # Summary
@@ -415,7 +392,13 @@ step_summary() {
     printf "  ${BOLD}%-28s${NC} %s\n" "conf.d:"         "${FLUENT_BIT_CONFD}"
     printf "  ${BOLD}%-28s${NC} %s\n" "Log:"            "${LOG_FILE}"
     echo ""
-    info "Useful commands:"
+    info "Verify locally (journalctl -u fluent-bit -f → look for HTTP status=200):"
+    echo -e "    ${CYAN}logger 'test message'${NC}"
+    echo ""
+    info "Verify in OpenObserve (from admin host):"
+    echo -e "    ${CYAN}https://${O2_HOST}${NC} → Logs → syslog → host = '$(hostname)'"
+    echo ""
+    info "Other useful commands:"
     echo -e "    ${CYAN}systemctl status fluent-bit${NC}"
     echo -e "    ${CYAN}journalctl -u fluent-bit -f${NC}"
     echo ""
@@ -440,7 +423,6 @@ main() {
     step_deploy_confd
     step_configure_docker
     step_enable_fluent_bit
-    step_verify
     step_summary
 }
 
