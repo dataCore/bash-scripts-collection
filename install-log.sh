@@ -165,11 +165,6 @@ step_get_credentials() {
         ok "Password: (from --pass)"
     fi
 
-    if $OPT_NO_VERIFY; then
-        warn "Skipping credential verification (--no-verify)"
-        return
-    fi
-
     echo ""
     info "Verifying credentials against https://${O2_HOST}..."
     local http_status
@@ -368,8 +363,6 @@ step_enable_fluent_bit() {
     fi
 }
 
-
-
 # =============================================================================
 # Summary
 # =============================================================================
@@ -392,15 +385,15 @@ step_summary() {
     printf "  ${BOLD}%-28s${NC} %s\n" "conf.d:"         "${FLUENT_BIT_CONFD}"
     printf "  ${BOLD}%-28s${NC} %s\n" "Log:"            "${LOG_FILE}"
     echo ""
-    info "Verify locally (journalctl -u fluent-bit -f → look for HTTP status=200):"
-    echo -e "    ${CYAN}logger 'test message'${NC}"
-    echo ""
-    info "Verify in OpenObserve (from admin host):"
-    echo -e "    ${CYAN}https://${O2_HOST}${NC} → Logs → syslog → host = '$(hostname)'"
-    echo ""
-    info "Other useful commands:"
-    echo -e "    ${CYAN}systemctl status fluent-bit${NC}"
+    info "Verify locally (look for HTTP status=200):"
     echo -e "    ${CYAN}journalctl -u fluent-bit -f${NC}"
+    echo -e "    ${CYAN}logger 'install-log test'${NC}"
+    echo ""
+    info "Verify in OpenObserve (from an admin host with UI access):"
+    echo -e "    ${CYAN}https://${O2_HOST}${NC} -> Logs -> syslog -> host = '$(hostname)'"
+    echo ""
+    info "Service commands:"
+    echo -e "    ${CYAN}systemctl status fluent-bit${NC}"
     echo ""
 }
 
