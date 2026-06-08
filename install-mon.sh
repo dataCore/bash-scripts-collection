@@ -90,6 +90,53 @@ check_args() {
 # Step 1 — Install Zabbix Repository & Agent2
 # =============================================================================
 
+ZABBIX_REPO_VERSION="7.2"
+
+detect_os() {
+    # Reads /etc/os-release and sets OS_ID and OS_CODENAME
+    if [[ ! -f /etc/os-release ]]; then
+        die "Cannot detect OS: /etc/os-release not found"
+    fi
+    # shellcheck source=/dev/null
+    source /etc/os-release
+    OS_ID="${ID:-unknown}"           # e.g. debian, ubuntu
+    OS_CODENAME="${VERSION_CODENAME:-unknown}"  # e.g. bookworm, noble
+    info "Detected OS: ${OS_ID} ${VERSION_ID} (${OS_CODENAME})"
+}
+
+ensure_zabbix_repo() {
+    # Skip if repo is already configured
+    if apt-cache show zabbix-agent2 &>/dev/null; then
+        info "Zabbix repository already configured"
+        return
+    fi
+
+    info "Adding Zabbix ${ZABBIX_REPO_VERSION} repository for ${OS_ID}/${OS_CODENAME} ..."
+
+    local deb_file="zabbix-release_latest_${ZABBIX_REPO_VERSION}+${OS_ID}${VERSION_ID}_all.deb"
+    local deb_url="https://repo.zabbix.com/zabbix/${ZABBIX_REPO_VERSION}/release/${OS_ID}/pool/main/z/zabbix-release/${deb_file}"
+    local tmp_deb="/tmp/${deb_file}"
+
+    # Verify this is a supported OS
+    case "${OS_ID}" in
+        debian|ubuntu) ;;
+        *) die "Unsupported OS '${OS_ID}' — only Debian and Ubuntu are supported" ;;
+    esac
+
+    if ! command -v wget &>/dev/null; then
+        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq wget
+    fi
+
+    wget -q -O "${tmp_deb}" "${deb_url}" \
+        || die "Failed to download Zabbix repo package from: ${deb_url}"
+
+    dpkg -i "${tmp_deb}" &>/dev/null \
+        || die "Failed to install Zabbix repo package"
+
+    rm -f "${tmp_deb}"
+    ok "Zabbix repository added"
+}
+
 step_install_zabbix() {
     print_section "Installing Zabbix Agent2"
 
@@ -97,6 +144,9 @@ step_install_zabbix() {
         ok "zabbix-agent2 already installed: $(zabbix_agent2 --version 2>/dev/null | head -1)"
         return
     fi
+
+    detect_os
+    ensure_zabbix_repo
 
     apt-get update -qq
     DEBIAN_FRONTEND=noninteractive apt-get install -y -qq zabbix-agent2
