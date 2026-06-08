@@ -186,7 +186,7 @@ step_install_packages() {
 
     local packages=()
 
-    if ! dpkg -l openssh-server &>/dev/null 2>&1; then
+    if ! dpkg-query -W -f='${Status}' openssh-server 2>/dev/null | grep -q '^install ok installed$'; then
         packages+=(openssh-server)
         info "openssh-server not found — will install"
     else
@@ -207,7 +207,7 @@ step_install_packages() {
         ok "figlet already installed"
     fi
 
-    if ! dpkg -l fail2ban &>/dev/null 2>&1; then
+    if ! dpkg-query -W -f='${Status}' fail2ban 2>/dev/null | grep -q '^install ok installed$'; then
         packages+=(fail2ban)
         info "fail2ban not found — will install"
     else
@@ -219,6 +219,21 @@ step_install_packages() {
         apt-get update -qq
         DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${packages[@]}"
         ok "Packages installed: ${packages[*]}"
+    fi
+
+    # Verify the main sshd_config exists. On minimal/cloud/LXC images the package
+    # can be installed while the conffile is missing. A plain --reinstall will NOT
+    # restore an absent conffile — dpkg treats deletion as deliberate; --force-confmiss
+    # is required to put it back.
+    if [[ ! -f "$SSHD_CONFIG" ]]; then
+        warn "openssh-server present but ${SSHD_CONFIG} is missing — restoring conffile"
+        DEBIAN_FRONTEND=noninteractive apt-get install --reinstall -y -qq \
+            -o Dpkg::Options::="--force-confmiss" openssh-server
+        if [[ -f "$SSHD_CONFIG" ]]; then
+            ok "Restored ${SSHD_CONFIG}"
+        else
+            die "Could not restore ${SSHD_CONFIG}.\n  Reinstall manually: apt-get install --reinstall -o Dpkg::Options::=\"--force-confmiss\" openssh-server"
+        fi
     fi
 
     # Enable & start sshd
@@ -403,6 +418,11 @@ EOF
 
 step_harden_sshd() {
     print_section "SSH Hardening (sshd_config.d)"
+
+    # Guard: sshd_config must exist — if missing, openssh-server install failed or path changed
+    if [[ ! -f "$SSHD_CONFIG" ]]; then
+        die "sshd_config not found at ${SSHD_CONFIG} — openssh-server may not be installed correctly.\n  Try manually: apt-get install --reinstall openssh-server"
+    fi
 
     # Backup main config
     if [[ ! -f "${SSHD_CONFIG}.bak" ]]; then
