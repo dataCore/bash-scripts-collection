@@ -90,7 +90,22 @@ check_args() {
 # Step 1 — Install Zabbix Repository & Agent2
 # =============================================================================
 
+# Fallback if the latest release cannot be detected from repo.zabbix.com
 ZABBIX_REPO_VERSION="7.2"
+
+detect_zabbix_version() {
+    local latest
+    latest=$(wget -qO- https://repo.zabbix.com/zabbix/ 2>/dev/null \
+        | grep -oE 'href="[0-9]+\.[0-9]+/"' \
+        | grep -oE '[0-9]+\.[0-9]+' \
+        | sort -uV | tail -1) || true
+    if [[ -n "$latest" ]]; then
+        ZABBIX_REPO_VERSION="$latest"
+        info "Latest Zabbix release: ${ZABBIX_REPO_VERSION}"
+    else
+        warn "Could not detect latest Zabbix release — using fallback ${ZABBIX_REPO_VERSION}"
+    fi
+}
 
 detect_os() {
     # Reads /etc/os-release and sets OS_ID and OS_CODENAME
@@ -111,12 +126,6 @@ ensure_zabbix_repo() {
         return
     fi
 
-    info "Adding Zabbix ${ZABBIX_REPO_VERSION} repository for ${OS_ID}/${OS_CODENAME} ..."
-
-    local deb_file="zabbix-release_latest_${ZABBIX_REPO_VERSION}+${OS_ID}${VERSION_ID}_all.deb"
-    local deb_url="https://repo.zabbix.com/zabbix/${ZABBIX_REPO_VERSION}/release/${OS_ID}/pool/main/z/zabbix-release/${deb_file}"
-    local tmp_deb="/tmp/${deb_file}"
-
     # Verify this is a supported OS
     case "${OS_ID}" in
         debian|ubuntu) ;;
@@ -126,6 +135,13 @@ ensure_zabbix_repo() {
     if ! command -v wget &>/dev/null; then
         DEBIAN_FRONTEND=noninteractive apt-get install -y -qq wget
     fi
+
+    detect_zabbix_version
+    info "Adding Zabbix ${ZABBIX_REPO_VERSION} repository for ${OS_ID}/${OS_CODENAME} ..."
+
+    local deb_file="zabbix-release_latest_${ZABBIX_REPO_VERSION}+${OS_ID}${VERSION_ID}_all.deb"
+    local deb_url="https://repo.zabbix.com/zabbix/${ZABBIX_REPO_VERSION}/release/${OS_ID}/pool/main/z/zabbix-release/${deb_file}"
+    local tmp_deb="/tmp/${deb_file}"
 
     wget -q -O "${tmp_deb}" "${deb_url}" \
         || die "Failed to download Zabbix repo package from: ${deb_url}"

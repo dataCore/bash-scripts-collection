@@ -219,11 +219,13 @@ step_configure_daemon() {
 EOF
 )
 
-    # Idempotent: only write if content differs
+    # Idempotent: only write if content differs (compare JSON semantically,
+    # so formatting/whitespace differences don't trigger a rewrite)
     if [[ -f "$DAEMON_JSON" ]]; then
-        local current
-        current=$(cat "$DAEMON_JSON")
-        if [[ "$current" == "$desired" ]]; then
+        local desired_norm current_norm
+        desired_norm=$(python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), sort_keys=True))' <<< "$desired")
+        current_norm=$(python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), sort_keys=True))' < "$DAEMON_JSON" 2>/dev/null || echo "INVALID")
+        if [[ "$current_norm" == "$desired_norm" ]]; then
             ok "daemon.json already up to date — no changes"
             return
         fi

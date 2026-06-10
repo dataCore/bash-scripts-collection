@@ -34,7 +34,7 @@ ALLPROJECTS=$(for i in $ALLCONTAINER; do docker inspect --format '{{ index .Conf
 for PROJECTNAME in $ALLPROJECTS; do
     update-docker "$PROJECTNAME" --auto=y
 done
-docker system prune -f
+docker image prune -f
 echo "Script to update all Docker Compose Projects completed"
 # =======================================================================
-echo "===============> End of backup-docker-all SCRIPT for: '${HOSTNAME}' "
+echo "===============> End of update-docker-all SCRIPT for: '${HOSTNAME}' "

@@ -1,5 +1,5 @@
 #!/bin/bash
-cd /usr/bin
+cd /usr/bin || exit 1
 folder="/usr/bin/datacore/bash"
 
 scripts=(
@@ -9,7 +9,7 @@ scripts=(
     "check-cve.sh:check-cve"
     "install-docker.sh:install-docker"
     "install-log.sh:install-log"
-	"install-mon.sh:install-mon"
+    "install-mon.sh:install-mon"
     "install-ssh.sh:install-ssh"
     "restore-docker.sh:restore-docker"
     "show-lastreboot.sh:show-lastreboot"

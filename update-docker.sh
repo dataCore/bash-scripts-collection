@@ -20,6 +20,7 @@ fi
 # Get docker-compose project name from variable or from current directory (lower case)
 PROJECTNAME=$(echo "${1:-$(basename "$PWD")}" | tr '[:upper:]' '[:lower:]')
 AUTO="${2:-}"
+AUTO="${AUTO#--auto=}"
 
 ALLCONTAINER=$(docker ps -q --filter "label=com.docker.compose.project=$PROJECTNAME")
 if [ -z "$ALLCONTAINER" ]; then
@@ -38,7 +39,7 @@ cd "$WORKINGDIR"
 
 if git -C "$WORKINGDIR" rev-parse --is-inside-work-tree &>/dev/null; then
     GIT_STATUS=$(git -C "$WORKINGDIR" status --porcelain 2>/dev/null)
-    GIT_UNPUSHED=$(git -C "$WORKINGDIR" log @{u}.. --oneline 2>/dev/null || true)
+    GIT_UNPUSHED=$(git -C "$WORKINGDIR" log "@{u}.." --oneline 2>/dev/null || true)
 
     if [ -n "$GIT_STATUS" ] || [ -n "$GIT_UNPUSHED" ]; then
         echo "⚠️  WARNING: Pending Git changes detected in '${WORKINGDIR}'!"
@@ -74,16 +75,17 @@ for CONTAINER in $CONTAINERS; do
         fi
         if [[ $answer == "n" ]]; then
             echo "❌ Update canceled."
-            exit
+            exit 0
         elif [[ $answer == "b" ]]; then
             echo "📦 Creating backup..."
             backup-docker "${PROJECTNAME}"
         fi
-        # Pull everything and restart
+        # Pull everything, then recreate only changed containers
+        # (no 'down' first — avoids leaving the project offline if 'up' fails)
         docker compose pull
-        docker compose down && docker compose up -d
+        docker compose up -d
         printf "✅ All up to date\n"
-        exit
+        exit 0
     fi
 done
 printf "✅ All up to date!\n"

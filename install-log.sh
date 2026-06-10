@@ -168,9 +168,11 @@ step_get_credentials() {
     echo ""
     info "Verifying credentials against https://${O2_HOST}..."
     local http_status
+    # Pass credentials via stdin config so they don't show up in the process list
     http_status=$(curl -s -o /dev/null -w "%{http_code}" \
-        -u "${O2_USER}:${O2_PASSWD}" \
-        "https://${O2_HOST}/api/${O2_ORG}/streams" || echo "000")
+        --config - \
+        "https://${O2_HOST}/api/${O2_ORG}/streams" \
+        <<< "user = \"${O2_USER}:${O2_PASSWD}\"" || echo "000")
 
     if [[ "$http_status" == "200" ]]; then
         ok "Credentials verified successfully"
@@ -296,7 +298,7 @@ step_configure_docker() {
 
     command -v docker &>/dev/null || die "Docker is not installed. Run install-docker.sh first."
 
-    if [[ -f "$DAEMON_JSON" ]] && grep -q '"log-driver": "fluentd"' "$DAEMON_JSON" 2>/dev/null; then
+    if [[ -f "$DAEMON_JSON" ]] && python3 -c "import json,sys; sys.exit(0 if json.load(open('$DAEMON_JSON')).get('log-driver')=='fluentd' else 1)" 2>/dev/null; then
         ok "Docker already configured with fluentd logging driver"
         return
     fi

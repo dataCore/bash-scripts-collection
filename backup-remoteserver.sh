@@ -20,6 +20,7 @@ CONFIG_FILE="/etc/backup-remoteserver.conf"
 #  sa_backup ALL=(ALL) NOPASSWD: /usr/bin/env PBS_PASSWORD=* PBS_FINGERPRINT=* /usr/bin/proxmox-backup-client *
 
 if [ -f "$CONFIG_FILE" ]; then
+    # shellcheck source=/dev/null
     source "$CONFIG_FILE"
 else
     echo "ERROR: Configuration file $CONFIG_FILE not found!"
@@ -47,7 +48,7 @@ echo "-"
 # --- EXECUTE REMOTE BACKUP ---
 # We open a Reverse Tunnel (-R):
 # Remote Port 8007 is forwarded to Local Port 8007
-ssh -o BatchMode=yes -o ConnectTimeout=10 -R 8007:127.0.0.1:8007 $USER@$REMOTE_IP \
+ssh -o BatchMode=yes -o ConnectTimeout=10 -R 8007:127.0.0.1:8007 "$USER@$REMOTE_IP" \
     "sudo /usr/bin/env PBS_PASSWORD='$PBS_PASSWORD' PBS_FINGERPRINT='$PBS_FINGERPRINT' \
     /usr/bin/proxmox-backup-client backup fileserver-backup.pxar:$REMOTE_PATH --repository '$PBS_REPOSITORY'"
 

@@ -53,13 +53,13 @@ TIMESTAMP=$(date +"%Y%m%d_%H%M")
 echo "$TIMESTAMP Backup for all Docker Compose Projects completed"
 # =======================================================================
 # OPTIONAL: UPLOAD TO PROXMOX BACKUP SERVER
-# Check if PBS_REPOSITORY is provided as 4th argument
-PBS_REPO="${4:-}"
+# Check if PBS_REPOSITORY is provided as 3rd argument
+PBS_REPO="${3:-}"
 
 if [ -n "$PBS_REPO" ]; then
     START_PBS=$(date +%s)
-    print_status "  🚀 Uploading to PBS: $HOSTNAME (All Projects)... "
-    
+    echo "🚀 Uploading to PBS: $HOSTNAME (All Projects)..."
+
     # nano ~/.bashrc
     # export PBS_PASSWORD="Dein_LXC_Passwort"
     # export PBS_FINGERPRINT="Dein:LXC:Fingerprint:von:vorhin"
@@ -70,9 +70,9 @@ if [ -n "$PBS_REPO" ]; then
         "${HOSTNAME}.pxar:${BACKUPDIR}" \
         --repository "$PBS_REPO" \
         --quiet
-    
+
     END_PBS=$(date +%s)
-    print_duration $((END_PBS - START_PBS))
+    echo "✅ PBS upload completed in $((END_PBS - START_PBS))s"
 fi
 # =======================================================================
 echo "===============> End of backup-docker-all SCRIPT for: '${HOSTNAME}' "
