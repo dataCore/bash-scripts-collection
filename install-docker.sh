@@ -58,6 +58,69 @@ warn() { echo -e "  ${YELLOW}⚠${NC}  $1"; log "[WARN] $1"; }
 err()  { echo -e "  ${RED}✗${NC}  $1"; log "[ERR]  $1"; }
 die()  { err "$1"; echo ""; exit 1; }
 
+# Run `apt-get update` but do not abort the whole install if an unrelated
+# third-party repository is broken — we verify the packages we actually need
+# are available before installing.
+apt_update() {
+    local errfile="/tmp/datacore-apt-update.$$"
+    if apt-get update -qq 2>"$errfile"; then
+        rm -f "$errfile"
+        return 0
+    fi
+    warn "apt-get update reported errors — likely a broken third-party repo:"
+    grep -E '^(E|W):' "$errfile" | sed 's/^/      /' || sed 's/^/      /' "$errfile"
+    rm -f "$errfile"
+    return 0
+}
+
+# Detect the OS and resolve the upstream Docker repository base.
+# Docker only publishes packages for debian and ubuntu, so derivatives such as
+# Linux Mint must map to their upstream distro + codename (e.g. Mint 22 -> ubuntu
+# noble), NOT the Mint-specific codename like "zena".
+detect_os() {
+    if [[ ! -f /etc/os-release ]]; then
+        die "Cannot detect OS: /etc/os-release not found"
+    fi
+    # shellcheck source=/dev/null
+    source /etc/os-release
+    local os_id="${ID:-unknown}"
+    local os_codename="${VERSION_CODENAME:-unknown}"
+    info "Detected OS: ${os_id} ${VERSION_ID:-?} (${os_codename})"
+
+    case "${os_id}" in
+        debian)
+            DOCKER_DISTRO="debian"
+            DOCKER_CODENAME="${os_codename}"
+            ;;
+        ubuntu)
+            DOCKER_DISTRO="ubuntu"
+            DOCKER_CODENAME="${os_codename}"
+            ;;
+        linuxmint|lmde)
+            # Mint ships the upstream codename in os-release:
+            #   Ubuntu-based Mint -> UBUNTU_CODENAME=jammy|noble|...
+            #   LMDE (Debian)     -> DEBIAN_CODENAME=bookworm|...
+            if [[ -n "${UBUNTU_CODENAME:-}" ]]; then
+                DOCKER_DISTRO="ubuntu"
+                DOCKER_CODENAME="${UBUNTU_CODENAME}"
+            elif [[ -n "${DEBIAN_CODENAME:-}" ]]; then
+                DOCKER_DISTRO="debian"
+                DOCKER_CODENAME="${DEBIAN_CODENAME}"
+            elif [[ "${ID_LIKE:-}" == *debian* ]]; then
+                DOCKER_DISTRO="debian"
+                DOCKER_CODENAME="${os_codename}"
+            else
+                DOCKER_DISTRO="ubuntu"
+                DOCKER_CODENAME="${os_codename}"
+            fi
+            info "Using ${DOCKER_DISTRO} (${DOCKER_CODENAME}) Docker repository base for ${os_id}"
+            ;;
+        *)
+            die "Unsupported OS '${os_id}' — only Debian, Ubuntu and Linux Mint are supported"
+            ;;
+    esac
+}
+
 # =============================================================================
 # Step 0 — Detect IP & Derive Subnets
 # =============================================================================
@@ -110,7 +173,7 @@ step_install_prerequisites() {
     done
 
     if [[ ${#to_install[@]} -gt 0 ]]; then
-        apt-get update -qq
+        apt_update
         DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${to_install[@]}"
         ok "Installed: ${to_install[*]}"
     fi
@@ -123,30 +186,40 @@ step_install_prerequisites() {
 step_add_docker_repo() {
     print_section "Docker APT Repository"
 
-    if [[ -f "$DOCKER_SOURCE" ]]; then
-        ok "Docker repository already configured — skipping"
+    local arch
+    arch=$(dpkg --print-architecture)
+
+    # Desired repository line — derived from the upstream distro/codename so
+    # that derivatives like Linux Mint point at the correct Docker repo
+    # (e.g. linux/ubuntu noble) instead of a non-existent one (linux/debian zena).
+    local desired_line="deb [arch=${arch} signed-by=${DOCKER_KEYRING}] https://download.docker.com/linux/${DOCKER_DISTRO} ${DOCKER_CODENAME} stable"
+
+    # Idempotent: if the existing source already matches, keep it.
+    if [[ -f "$DOCKER_SOURCE" ]] && grep -qxF "$desired_line" "$DOCKER_SOURCE"; then
+        ok "Docker repository already configured: ${DOCKER_DISTRO}/${DOCKER_CODENAME} (${arch})"
         return
+    fi
+    if [[ -f "$DOCKER_SOURCE" ]]; then
+        warn "Existing ${DOCKER_SOURCE} differs (wrong distro/codename?) — rewriting"
     fi
 
     install -m 0755 -d /etc/apt/keyrings
 
-    info "Fetching Docker GPG key..."
-    curl -fsSL https://download.docker.com/linux/debian/gpg \
-        | gpg --dearmor -o "$DOCKER_KEYRING"
-    chmod a+r "$DOCKER_KEYRING"
-    ok "GPG key saved to ${DOCKER_KEYRING}"
+    if [[ ! -s "$DOCKER_KEYRING" ]]; then
+        info "Fetching Docker GPG key..."
+        curl -fsSL "https://download.docker.com/linux/${DOCKER_DISTRO}/gpg" \
+            | gpg --dearmor -o "$DOCKER_KEYRING"
+        chmod a+r "$DOCKER_KEYRING"
+        ok "GPG key saved to ${DOCKER_KEYRING}"
+    fi
 
-    local codename
-    codename=$(lsb_release -cs)
-    local arch
-    arch=$(dpkg --print-architecture)
+    echo "$desired_line" > "$DOCKER_SOURCE"
+    ok "Repository added: ${DOCKER_DISTRO}/${DOCKER_CODENAME} (${arch})"
 
-    echo "deb [arch=${arch} signed-by=${DOCKER_KEYRING}] \
-https://download.docker.com/linux/debian ${codename} stable" \
-        > "$DOCKER_SOURCE"
-
-    ok "Repository added: debian/${codename} (${arch})"
-    apt-get update -qq
+    apt_update
+    if ! apt-cache show docker-ce &>/dev/null; then
+        die "docker-ce is not available — check the Docker repository for ${DOCKER_DISTRO}/${DOCKER_CODENAME}"
+    fi
 }
 
 # =============================================================================
@@ -314,6 +387,7 @@ main() {
     echo "=== install-docker.sh === $(date)" >> "$LOG_FILE"
 
     print_header
+    detect_os
     step_detect_network
     step_install_prerequisites
     step_add_docker_repo

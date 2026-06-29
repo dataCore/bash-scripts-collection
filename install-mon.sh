@@ -60,6 +60,21 @@ warn() { echo -e "  ${YELLOW}⚠${NC}  $1"; log "[WARN] $1"; }
 err()  { echo -e "  ${RED}✗${NC}  $1"; log "[ERR]  $1"; }
 die()  { err "$1"; echo ""; exit 1; }
 
+# Run `apt-get update` but do not abort the whole install if an unrelated
+# third-party repository (e.g. a misconfigured Docker repo) is broken — we
+# verify the package we actually need is available before installing.
+apt_update() {
+    local errfile="/tmp/datacore-apt-update.$$"
+    if apt-get update -qq 2>"$errfile"; then
+        rm -f "$errfile"
+        return 0
+    fi
+    warn "apt-get update reported errors — likely a broken third-party repo:"
+    grep -E '^(E|W):' "$errfile" | sed 's/^/      /' || sed 's/^/      /' "$errfile"
+    rm -f "$errfile"
+    return 0
+}
+
 # =============================================================================
 # Pre-flight
 # =============================================================================
@@ -219,7 +234,10 @@ step_install_zabbix() {
     detect_os
     ensure_zabbix_repo
 
-    apt-get update -qq
+    apt_update
+    if ! apt-cache show zabbix-agent2 &>/dev/null; then
+        die "zabbix-agent2 is not available — check the Zabbix repository (a broken third-party repo above does not affect this)"
+    fi
     DEBIAN_FRONTEND=noninteractive apt-get install -y -qq zabbix-agent2
     ok "Installed: $(zabbix_agent2 --version 2>/dev/null | head -1)"
 }
