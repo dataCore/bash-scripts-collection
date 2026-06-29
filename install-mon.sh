@@ -107,16 +107,71 @@ detect_zabbix_version() {
     fi
 }
 
+# Map an Ubuntu/Debian codename to its version number (used to build repo URLs).
+codename_to_version() {
+    case "$1" in
+        # Ubuntu
+        focal)    echo "20.04" ;;
+        jammy)    echo "22.04" ;;
+        noble)    echo "24.04" ;;
+        # Debian
+        buster)   echo "10" ;;
+        bullseye) echo "11" ;;
+        bookworm) echo "12" ;;
+        trixie)   echo "13" ;;
+        *)        echo "" ;;
+    esac
+}
+
 detect_os() {
-    # Reads /etc/os-release and sets OS_ID and OS_CODENAME
+    # Reads /etc/os-release and sets:
+    #   OS_ID / VERSION_ID / OS_CODENAME — what is actually installed
+    #   REPO_ID / REPO_VERSION_ID / REPO_CODENAME — the upstream base used
+    #     to build the Zabbix repo URL (Mint -> ubuntu/debian, etc.)
     if [[ ! -f /etc/os-release ]]; then
         die "Cannot detect OS: /etc/os-release not found"
     fi
     # shellcheck source=/dev/null
     source /etc/os-release
-    OS_ID="${ID:-unknown}"           # e.g. debian, ubuntu
-    OS_CODENAME="${VERSION_CODENAME:-unknown}"  # e.g. bookworm, noble
-    info "Detected OS: ${OS_ID} ${VERSION_ID} (${OS_CODENAME})"
+    OS_ID="${ID:-unknown}"                       # e.g. debian, ubuntu, linuxmint
+    OS_CODENAME="${VERSION_CODENAME:-unknown}"   # e.g. bookworm, noble, wilma
+    info "Detected OS: ${OS_ID} ${VERSION_ID:-?} (${OS_CODENAME})"
+
+    case "${OS_ID}" in
+        debian|ubuntu)
+            REPO_ID="${OS_ID}"
+            REPO_VERSION_ID="${VERSION_ID}"
+            REPO_CODENAME="${OS_CODENAME}"
+            ;;
+        linuxmint|lmde)
+            # Linux Mint ships the upstream codename in os-release:
+            #   - Ubuntu-based Mint:  UBUNTU_CODENAME=jammy|noble|...
+            #   - LMDE (Debian-based): DEBIAN_CODENAME=bookworm|...
+            if [[ -n "${UBUNTU_CODENAME:-}" ]]; then
+                REPO_ID="ubuntu"
+                REPO_CODENAME="${UBUNTU_CODENAME}"
+            elif [[ -n "${DEBIAN_CODENAME:-}" ]]; then
+                REPO_ID="debian"
+                REPO_CODENAME="${DEBIAN_CODENAME}"
+            elif [[ "${ID_LIKE:-}" == *debian* ]]; then
+                # LMDE without DEBIAN_CODENAME — fall back to its own codename
+                REPO_ID="debian"
+                REPO_CODENAME="${OS_CODENAME}"
+            else
+                REPO_ID="ubuntu"
+                REPO_CODENAME="${OS_CODENAME}"
+            fi
+            REPO_VERSION_ID="$(codename_to_version "${REPO_CODENAME}")"
+            [[ -n "${REPO_VERSION_ID}" ]] \
+                || die "Cannot map ${OS_ID} (${REPO_CODENAME}) to a supported ${REPO_ID} release"
+            info "Using ${REPO_ID} ${REPO_VERSION_ID} (${REPO_CODENAME}) repository base for ${OS_ID}"
+            ;;
+        *)
+            REPO_ID="${OS_ID}"
+            REPO_VERSION_ID="${VERSION_ID}"
+            REPO_CODENAME="${OS_CODENAME}"
+            ;;
+    esac
 }
 
 ensure_zabbix_repo() {
@@ -126,10 +181,10 @@ ensure_zabbix_repo() {
         return
     fi
 
-    # Verify this is a supported OS
-    case "${OS_ID}" in
+    # Verify the resolved repository base is supported by Zabbix
+    case "${REPO_ID}" in
         debian|ubuntu) ;;
-        *) die "Unsupported OS '${OS_ID}' — only Debian and Ubuntu are supported" ;;
+        *) die "Unsupported OS '${OS_ID}' — only Debian, Ubuntu and Linux Mint are supported" ;;
     esac
 
     if ! command -v wget &>/dev/null; then
@@ -137,10 +192,10 @@ ensure_zabbix_repo() {
     fi
 
     detect_zabbix_version
-    info "Adding Zabbix ${ZABBIX_REPO_VERSION} repository for ${OS_ID}/${OS_CODENAME} ..."
+    info "Adding Zabbix ${ZABBIX_REPO_VERSION} repository for ${REPO_ID}/${REPO_CODENAME} ..."
 
-    local deb_file="zabbix-release_latest_${ZABBIX_REPO_VERSION}+${OS_ID}${VERSION_ID}_all.deb"
-    local deb_url="https://repo.zabbix.com/zabbix/${ZABBIX_REPO_VERSION}/release/${OS_ID}/pool/main/z/zabbix-release/${deb_file}"
+    local deb_file="zabbix-release_latest_${ZABBIX_REPO_VERSION}+${REPO_ID}${REPO_VERSION_ID}_all.deb"
+    local deb_url="https://repo.zabbix.com/zabbix/${ZABBIX_REPO_VERSION}/release/${REPO_ID}/pool/main/z/zabbix-release/${deb_file}"
     local tmp_deb="/tmp/${deb_file}"
 
     wget -q -O "${tmp_deb}" "${deb_url}" \
