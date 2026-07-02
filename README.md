@@ -46,7 +46,6 @@ This repository contains a collection of useful Bash scripts for managing Docker
 | Script | Parameters | Description |
 |---|---|---|
 | `show-lastreboot.sh` | | Displays the last system reboot time. |
-| `wol.sh` | `{MAC} {IP} {Port}` | Sends a Wake-on-LAN magic packet to a device on the network (third-party, MIT, [WoL.sh](https://github.com/leestevetk/WoL.sh)). |
 | `link.sh` | | Creates symbolic links for all scripts into `/usr/bin/` (run once after install). |
 
 
@@ -69,7 +68,6 @@ bash-scripts-collection/
 ├── update-docker-all.sh
 ├── update-scripts.sh
 ├── update-system.sh
-├── wol.sh
 ├── logconfs/             ← Fluent Bit source configs for install-log.sh
 │   ├── linux.conf
 │   ├── docker.conf

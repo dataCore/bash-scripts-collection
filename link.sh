@@ -17,7 +17,6 @@ scripts=(
     "update-docker-all.sh:update-docker-all"
     "update-scripts.sh:update-scripts"
     "update-system.sh:update-system"
-    "wol.sh:wol"
 )
 
 for entry in "${scripts[@]}"; do
