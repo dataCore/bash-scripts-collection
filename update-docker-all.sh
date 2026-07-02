@@ -31,10 +31,20 @@ trap 'echo -e "\n❌ Error in Line $LINENO. Update Script canceled."; exit 1' ER
 ALLCONTAINER=$(docker ps --format '{{.Names}}')
 ALLPROJECTS=$(for i in $ALLCONTAINER; do docker inspect --format '{{ index .Config.Labels "com.docker.compose.project"}}' "$i"; done | sort -u)
 ### Do the stuff
+# A failing project must not abort the remaining updates – collect failures
+# and report them at the end with a non-zero exit code for monitoring.
+FAILED_PROJECTS=()
 for PROJECTNAME in $ALLPROJECTS; do
-    update-docker "$PROJECTNAME" --auto=y
+    if ! update-docker "$PROJECTNAME" --auto=y; then
+        echo "❌ Update of project '${PROJECTNAME}' failed. Continuing with next project."
+        FAILED_PROJECTS+=("$PROJECTNAME")
+    fi
 done
 docker image prune -f
 echo "Script to update all Docker Compose Projects completed"
 # =======================================================================
 echo "===============> End of update-docker-all SCRIPT for: '${HOSTNAME}' "
+if [ "${#FAILED_PROJECTS[@]}" -gt 0 ]; then
+    echo "❌ Failed projects: ${FAILED_PROJECTS[*]}"
+    exit 1
+fi

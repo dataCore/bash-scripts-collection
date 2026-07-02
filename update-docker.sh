@@ -32,6 +32,11 @@ WORKINGDIR=$(for i in $ALLCONTAINER; do
     docker inspect --format '{{ index .Config.Labels "com.docker.compose.project.working_dir"}}' "$i"
 done | sort -u | head -n 1)
 
+if [ -z "$WORKINGDIR" ] || [ ! -d "$WORKINGDIR" ]; then
+    echo "❌ Could not determine working directory for project '${PROJECTNAME}'."
+    exit 1
+fi
+
 # =======================================================================
 # Check for pending git changes in the working directory
 # =======================================================================
@@ -49,7 +54,7 @@ if git -C "$WORKINGDIR" rev-parse --is-inside-work-tree &>/dev/null; then
         fi
         if [ -n "$GIT_UNPUSHED" ]; then
             echo "   Unpushed commits:"
-            echo "$GIT_UNPUSHED" | sed 's/^/     /'
+            echo "     ${GIT_UNPUSHED//$'\n'/$'\n'     }"
         fi
     fi
 fi
@@ -59,33 +64,59 @@ echo -n "🔍 Checking for newer Docker images for '${PROJECTNAME}'..."
 
 # Get all images used in the current docker-compose.yml
 CONTAINERS=$(docker compose ps -q 2>/dev/null || true)
+UPDATE_NEEDED=false
 for CONTAINER in $CONTAINERS; do
     IMAGE=$(docker inspect --format='{{.Config.Image}}' "$CONTAINER")
-    # Pull the latest image (but don't run it yet)
-    docker pull "$IMAGE" >/dev/null
-    LATEST_IMAGE_ID=$(docker inspect --format='{{.Id}}' "$IMAGE")
     RUNNING_IMAGE_ID=$(docker inspect --format='{{.Image}}' "$CONTAINER")
-    # Check if we need an update
-    if [ "$RUNNING_IMAGE_ID" != "$LATEST_IMAGE_ID" ]; then
-        echo -e "\n🔄 Update for '${PROJECTNAME}' available!"
-        if [[ -n $AUTO ]]; then
-            answer="$AUTO"
-        else
-            read -r -p "Want to continue with the update? (y/n) with a backup? (b): " answer
+
+    # Container running an older image than the local tag → recreate needed
+    LOCAL_IMAGE_ID=$(docker image inspect --format '{{.Id}}' "$IMAGE" 2>/dev/null || true)
+    if [ -n "$LOCAL_IMAGE_ID" ] && [ "$RUNNING_IMAGE_ID" != "$LOCAL_IMAGE_ID" ]; then
+        UPDATE_NEEDED=true
+        break
+    fi
+
+    # Compare local vs. registry digest – no image download needed
+    LOCAL_DIGEST=$(docker image inspect \
+        --format '{{if .RepoDigests}}{{index .RepoDigests 0}}{{end}}' "$IMAGE" 2>/dev/null \
+        | awk -F@ '{print $2}' || true)
+    REMOTE_DIGEST=$(docker buildx imagetools inspect "$IMAGE" \
+        --format '{{.Manifest.Digest}}' 2>/dev/null || true)
+
+    if [ -z "$LOCAL_DIGEST" ] || [ -z "$REMOTE_DIGEST" ]; then
+        # Locally built image, buildx missing or registry unreachable –
+        # fall back to the old pull-based comparison for this image only.
+        if ! docker pull "$IMAGE" >/dev/null 2>&1; then
+            continue
         fi
-        if [[ $answer == "n" ]]; then
-            echo "❌ Update canceled."
-            exit 0
-        elif [[ $answer == "b" ]]; then
-            echo "📦 Creating backup..."
-            backup-docker "${PROJECTNAME}"
+        LATEST_IMAGE_ID=$(docker inspect --format='{{.Id}}' "$IMAGE")
+        if [ "$RUNNING_IMAGE_ID" != "$LATEST_IMAGE_ID" ]; then
+            UPDATE_NEEDED=true
+            break
         fi
-        # Pull everything, then recreate only changed containers
-        # (no 'down' first — avoids leaving the project offline if 'up' fails)
-        docker compose pull
-        docker compose up -d
-        printf "✅ All up to date\n"
-        exit 0
+    elif [ "$LOCAL_DIGEST" != "$REMOTE_DIGEST" ]; then
+        UPDATE_NEEDED=true
+        break
     fi
 done
+
+if [ "$UPDATE_NEEDED" = true ]; then
+    echo -e "\n🔄 Update for '${PROJECTNAME}' available!"
+    if [[ -n $AUTO ]]; then
+        answer="$AUTO"
+    else
+        read -r -p "Want to continue with the update? (y/n) with a backup? (b): " answer
+    fi
+    if [[ $answer == "n" ]]; then
+        echo "❌ Update canceled."
+        exit 0
+    elif [[ $answer == "b" ]]; then
+        echo "📦 Creating backup..."
+        backup-docker "${PROJECTNAME}"
+    fi
+    # Pull everything, then recreate only changed containers
+    # (no 'down' first — avoids leaving the project offline if 'up' fails)
+    docker compose pull
+    docker compose up -d
+fi
 printf "✅ All up to date!\n"

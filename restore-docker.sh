@@ -46,7 +46,7 @@ compose_up() {
     local output
     if ! output=$(docker compose up -d "$service" 2>&1); then
         echo "❌ Failed to start service '${service}':"
-        echo "$output" | sed 's/^/   /'
+        echo "   ${output//$'\n'/$'\n'   }"
         # Common hint: missing bind-mount source files on the host
         if echo "$output" | grep -q "not a directory\|No such file or directory"; then
             echo ""
@@ -110,20 +110,20 @@ wait_healthy() {
                 local ready=false
                 case "$db_type" in
                     mariadb|mysql)
-                        docker exec "$cid" sh -c \
+                        if docker exec "$cid" sh -c \
                             'mariadb-admin ping -u root -p"${MYSQL_ROOT_PASSWORD:-$DB_ROOT_PASSWORD}" --silent' \
-                            2>/dev/null && ready=true || true
+                            2>/dev/null; then ready=true; fi
                         ;;
                     postgres)
-                        docker exec "$cid" sh -c \
+                        if docker exec "$cid" sh -c \
                             'pg_isready -U "$POSTGRES_USER" --quiet' \
-                            2>/dev/null && ready=true || true
+                            2>/dev/null; then ready=true; fi
                         ;;
                     mongo)
-                        docker exec "$cid" sh -c \
+                        if docker exec "$cid" sh -c \
                             'mongosh --quiet --eval "db.adminCommand(\"ping\")" 2>/dev/null || \
                              mongo --quiet --eval "db.adminCommand(\"ping\")" 2>/dev/null' \
-                            2>/dev/null && ready=true || true
+                            2>/dev/null; then ready=true; fi
                         ;;
                     *)
                         # Non-DB service: just check if container is running
@@ -185,7 +185,7 @@ for file in "$BACKUPDIR"/*"$PROJECTNAME"*; do
         *.mariadbdump.sql.gz)   MARIADBS+=("$filename") ;;
         *.mysqldump.sql.gz)     MYSQLS+=("$filename") ;;
         *.postgredump.sql.gz)   POSTGRES+=("$filename") ;;
-        *.mongodump.sql.gz)     MONGOS+=("$filename") ;;
+        *.mongodump.archive.gz | *.mongodump.sql.gz) MONGOS+=("$filename") ;;
         *.gitlabbackup.tar.gz)  GITLABS+=("$filename") ;;
         *.volume.tar.gz)        VOLUMES+=("$filename") ;;
     esac
@@ -334,7 +334,7 @@ elif [[ "$SELECTED" == *.postgredump.sql.gz ]]; then
 
 # =======================================================================
 # RESTORE MongoDB
-elif [[ "$SELECTED" == *.mongodump.sql.gz ]]; then
+elif [[ "$SELECTED" == *.mongodump.archive.gz || "$SELECTED" == *.mongodump.sql.gz ]]; then
     echo "🍃 Restoring MongoDB..."
     compose_up "$SERVICENAME"
     wait_healthy "$SERVICENAME" mongo
@@ -364,7 +364,8 @@ elif [[ "$SELECTED" == *.gitlabbackup.tar.gz ]]; then
 
     # Determine the backup timestamp token from the archive filename
     # GitLab restore expects the token part (everything before _gitlab_backup.tar)
-    BACKUP_TOKEN=$(ls "${GITLAB_BACKUP_HOST}"/*_gitlab_backup.tar 2>/dev/null | head -n 1 | xargs basename | sed 's/_gitlab_backup\.tar//')
+    BACKUP_TOKEN=$(find "${GITLAB_BACKUP_HOST}" -maxdepth 1 -name '*_gitlab_backup.tar' -printf '%f\n' 2>/dev/null | sort | head -n 1)
+    BACKUP_TOKEN=${BACKUP_TOKEN%_gitlab_backup.tar}
     if [ -z "$BACKUP_TOKEN" ]; then
         echo "❌ Could not find a gitlab_backup.tar file in ${GITLAB_BACKUP_HOST}"
         exit 1

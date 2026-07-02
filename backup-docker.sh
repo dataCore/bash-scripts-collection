@@ -190,7 +190,7 @@ for cont in $CONTAINERS; do
             else
                 if [ "${DB_DONE[$cont]+set}" ]; then continue; fi
                 DB_DONE[$cont]=1
-                OUTPUT="${TIMESTAMP}_${PROJECTNAME}.${CONTAINERNAME}.mongodump.sql.gz"
+                OUTPUT="${TIMESTAMP}_${PROJECTNAME}.${CONTAINERNAME}.mongodump.archive.gz"
                 print_status "  🍃 MongoDB: ${OUTPUT}... "
                 docker exec "${cont}" sh -c 'mongodump --archive --gzip --quiet' \
                     > "${TEMPDIR}/${OUTPUT}"

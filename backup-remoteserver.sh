@@ -48,12 +48,11 @@ echo "-"
 # --- EXECUTE REMOTE BACKUP ---
 # We open a Reverse Tunnel (-R):
 # Remote Port 8007 is forwarded to Local Port 8007
-ssh -o BatchMode=yes -o ConnectTimeout=10 -R 8007:127.0.0.1:8007 "$USER@$REMOTE_IP" \
+# --- ERROR HANDLING ---
+if ssh -o BatchMode=yes -o ConnectTimeout=10 -R 8007:127.0.0.1:8007 "$USER@$REMOTE_IP" \
     "sudo /usr/bin/env PBS_PASSWORD='$PBS_PASSWORD' PBS_FINGERPRINT='$PBS_FINGERPRINT' \
     /usr/bin/proxmox-backup-client backup fileserver-backup.pxar:$REMOTE_PATH --repository '$PBS_REPOSITORY'"
-
-# --- ERROR HANDLING ---
-if [ $? -eq 0 ]; then
+then
     echo "-"
     echo "SUCCESS: Backup of $REMOTE_IP completed."
     echo "-"

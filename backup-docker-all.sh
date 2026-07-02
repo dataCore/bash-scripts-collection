@@ -46,8 +46,18 @@ echo "BACKUPDURATIONDAYS=${BACKUPDURATIONDAYS}"
 ALLCONTAINER=$(docker ps --format '{{.Names}}')
 ALLPROJECTS=$(for i in $ALLCONTAINER; do docker inspect --format '{{ index .Config.Labels "com.docker.compose.project"}}' "$i"; done | sort -u)
 ### Do the stuff
+# A failing project must not abort the remaining backups – collect failures
+# and report them at the end with a non-zero exit code for monitoring.
+FAILED_PROJECTS=()
 for PROJECTNAME in $ALLPROJECTS; do
-    backup-docker "$PROJECTNAME" "$BACKUPDIR" "$BACKUPDURATIONDAYS"
+    RC=0
+    backup-docker "$PROJECTNAME" "$BACKUPDIR" "$BACKUPDURATIONDAYS" || RC=$?
+    if [ "$RC" -eq 2 ]; then
+        echo "⚠️  Project '${PROJECTNAME}' skipped (no running containers)."
+    elif [ "$RC" -ne 0 ]; then
+        echo "❌ Backup of project '${PROJECTNAME}' failed (exit $RC). Continuing with next project."
+        FAILED_PROJECTS+=("$PROJECTNAME")
+    fi
 done
 TIMESTAMP=$(date +"%Y%m%d_%H%M")
 echo "$TIMESTAMP Backup for all Docker Compose Projects completed"
@@ -76,3 +86,7 @@ if [ -n "$PBS_REPO" ]; then
 fi
 # =======================================================================
 echo "===============> End of backup-docker-all SCRIPT for: '${HOSTNAME}' "
+if [ "${#FAILED_PROJECTS[@]}" -gt 0 ]; then
+    echo "❌ Failed projects: ${FAILED_PROJECTS[*]}"
+    exit 1
+fi
