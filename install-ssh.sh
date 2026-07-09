@@ -11,13 +11,15 @@
 #
 # What this script does:
 #   1. Set timezone to Europe/Zurich
-#   2. Install openssh-server + figlet + sudo (if missing)
+#   2. Install openssh-server, fail2ban, figlet + base tools
+#      (sudo net-tools vim htop git wget curl gpg) — only what is missing
 #   3. Create group 'ssh-users' and add <username>
 #   4. Grant <username> passwordless sudo via /etc/sudoers.d/
-#   5. Generate SSH banner via figlet
-#   6. Configure fail2ban for SSH (5 attempts → bantime)
-#   7. Harden sshd_config (AllowGroups, key-only, no root, etc.)
-#   8. Install pubkeys/<username>.pub as authorized_keys for <username>
+#   5. Set git credential.helper=store for <username>
+#   6. Generate SSH banner via figlet
+#   7. Configure fail2ban for SSH (5 attempts → bantime)
+#   8. Harden sshd_config (AllowGroups, key-only, no root, etc.)
+#   9. Install pubkeys/<username>.pub as authorized_keys for <username>
 #
 # Repository: https://code.geek.ch/dataCore/bash-scripts-collection
 # =============================================================================
@@ -29,6 +31,12 @@ RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 BLUE='\033[0;34m'; CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
 
 # --------------- Config -------------------------------------------------------
+# Packages the script needs, plus the baseline toolset every dataCore host gets.
+REQUIRED_PACKAGES=(
+    openssh-server fail2ban figlet          # needed by this script
+    sudo net-tools vim htop git wget curl gpg
+)
+
 SSH_GROUP="ssh-users"
 SSH_PORT=22
 SSHD_CONFIG="/etc/ssh/sshd_config"
@@ -184,35 +192,16 @@ step_set_timezone() {
 step_install_packages() {
     print_section "Installing Packages"
 
-    local packages=()
+    local packages=() pkg
 
-    if ! dpkg-query -W -f='${Status}' openssh-server 2>/dev/null | grep -q '^install ok installed$'; then
-        packages+=(openssh-server)
-        info "openssh-server not found — will install"
-    else
-        ok "openssh-server already installed"
-    fi
-
-    if ! command -v sudo &>/dev/null; then
-        packages+=(sudo)
-        info "sudo not found — will install"
-    else
-        ok "sudo already installed"
-    fi
-
-    if ! command -v figlet &>/dev/null; then
-        packages+=(figlet)
-        info "figlet not found — will install"
-    else
-        ok "figlet already installed"
-    fi
-
-    if ! dpkg-query -W -f='${Status}' fail2ban 2>/dev/null | grep -q '^install ok installed$'; then
-        packages+=(fail2ban)
-        info "fail2ban not found — will install"
-    else
-        ok "fail2ban already installed"
-    fi
+    for pkg in "${REQUIRED_PACKAGES[@]}"; do
+        if dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q '^install ok installed$'; then
+            ok "${pkg} already installed"
+        else
+            packages+=("$pkg")
+            info "${pkg} not found — will install"
+        fi
+    done
 
     if [[ ${#packages[@]} -gt 0 ]]; then
         info "Running apt-get install: ${packages[*]}"
@@ -293,6 +282,25 @@ step_setup_sudo() {
         rm -f "${sudoers_file}.tmp"
         die "visudo validation failed — sudoers file not written"
     fi
+}
+
+# =============================================================================
+# Step 2c — Git credential helper
+# =============================================================================
+
+step_setup_git() {
+    print_section "Git Configuration"
+
+    local gitconfig="${TARGET_HOME}/.gitconfig"
+
+    # We run as root, so `git config --global` would target /root/.gitconfig.
+    # Write the target user's config explicitly instead, then hand it back.
+    git config --file "$gitconfig" credential.helper store
+    chown "${TARGET_USER}:${TARGET_USER}" "$gitconfig"
+    chmod 644 "$gitconfig"
+
+    ok "git credential.helper=store set in ${gitconfig}"
+    warn "Credentials will be stored unencrypted in ${TARGET_HOME}/.git-credentials"
 }
 
 # =============================================================================
@@ -568,6 +576,7 @@ step_summary() {
     printf "  ${BOLD}%-28s${NC} %s\n" "Timezone:"            "${TIMEZONE}"
     printf "  ${BOLD}%-28s${NC} %s\n" "SSH group:"           "${SSH_GROUP}"
     printf "  ${BOLD}%-28s${NC} %s\n" "Sudo:"                "${SUDOERS_DIR}/10-${TARGET_USER}  (NOPASSWD:ALL)"
+    printf "  ${BOLD}%-28s${NC} %s\n" "Git credentials:"     "${TARGET_HOME}/.gitconfig  (helper=store)"
     printf "  ${BOLD}%-28s${NC} %s\n" "Fail2ban ban:"        "5 attempts → ${FAIL2BAN_BANTIME}"
     printf "  ${BOLD}%-28s${NC} %s\n" "Banner:"              "${SSHD_BANNER_FILE}  (auto-updated on boot)"
     printf "  ${BOLD}%-28s${NC} %s\n" "Banner script:"       "/usr/local/sbin/update-ssh-banner"
@@ -606,6 +615,7 @@ main() {
     step_install_packages
     step_setup_group
     step_setup_sudo
+    step_setup_git
     step_create_banner
     step_configure_fail2ban
     step_harden_sshd
