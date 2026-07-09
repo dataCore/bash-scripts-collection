@@ -16,7 +16,12 @@
 # 8. Verify logs are reaching OpenObserve
 #
 # Required:
-#   --host <fqdn>     OpenObserve endpoint (e.g. log.geek.ch, log.it-processing.ch)
+#   --host <fqdn>     OpenObserve endpoint, e.g. log.geek.ch
+#                     Always the Traefik FQDN, for internal hosts too: the
+#                     ingest API (/api/) is public, the UI is internal-only.
+#                     The container publishes no host port, and Traefik routes
+#                     on Host(log.geek.ch) — so the internal name datacorelog
+#                     does not work (no route, no matching TLS cert).
 #
 # Optional source flags:
 #   --docker          Include Docker log collection (requires Docker)
@@ -28,6 +33,10 @@
 #   --pass <secret>   OpenObserve ingest password (avoid on shared shells)
 #   --vlan <id>       Override auto-detected VLAN
 #   --org <name>      OpenObserve organization (default: default)
+#
+# Re-running is safe and idempotent: fluent-bit.conf is regenerated from
+# scratch, so re-running with a different --host switches the target and
+# restarts the service.
 #
 # Examples:
 #   install-log.sh --host log.geek.ch --docker
@@ -68,6 +77,10 @@ O2_PASSWD=""
 O2_ORG="default"
 VLAN_OVERRIDE=""
 
+# Upstream APT base, filled in by detect_repo_base()
+REPO_ID=""
+REPO_CODENAME=""
+
 # =============================================================================
 # Helpers
 # =============================================================================
@@ -92,7 +105,7 @@ err()   { echo -e "  ${RED}✗${NC} $1"; log "[ERR] $1"; }
 die()   { err "$1"; echo ""; exit 1; }
 
 usage() {
-    grep '^#' "$0" | sed 's/^# \{0,1\}//' | head -40
+    grep '^#' "$0" | sed 's/^# \{0,1\}//' | head -46
     exit "${1:-0}"
 }
 
@@ -184,6 +197,53 @@ step_get_credentials() {
 # =============================================================================
 # Step 2 — Install Fluent Bit
 # =============================================================================
+# Resolve the upstream distro Fluent Bit actually publishes packages for and
+# set REPO_ID / REPO_CODENAME. Derivatives such as Linux Mint carry their own
+# codename (e.g. "zena"), which has no repo at packages.fluentbit.io — their
+# os-release names the upstream base in UBUNTU_CODENAME / DEBIAN_CODENAME.
+detect_repo_base() {
+    local os_release="${OS_RELEASE:-/etc/os-release}"
+    [[ -f "$os_release" ]] || die "Cannot detect OS: ${os_release} not found"
+    # shellcheck source=/dev/null
+    source "$os_release"
+
+    local os_id="${ID:-unknown}"
+    local os_codename="${VERSION_CODENAME:-}"
+
+    case "$os_id" in
+        debian|ubuntu)
+            REPO_ID="$os_id"
+            REPO_CODENAME="$os_codename"
+            ;;
+        linuxmint|lmde)
+            if [[ -n "${UBUNTU_CODENAME:-}" ]]; then
+                REPO_ID="ubuntu"
+                REPO_CODENAME="${UBUNTU_CODENAME}"
+            elif [[ -n "${DEBIAN_CODENAME:-}" ]]; then
+                REPO_ID="debian"
+                REPO_CODENAME="${DEBIAN_CODENAME}"
+            else
+                die "Linux Mint detected but os-release names no upstream codename."
+            fi
+            ;;
+        *)
+            if [[ "${ID_LIKE:-}" == *ubuntu* ]]; then
+                REPO_ID="ubuntu"
+                REPO_CODENAME="${UBUNTU_CODENAME:-$os_codename}"
+            elif [[ "${ID_LIKE:-}" == *debian* ]]; then
+                REPO_ID="debian"
+                REPO_CODENAME="${DEBIAN_CODENAME:-$os_codename}"
+            else
+                die "Unsupported distribution: ${os_id}"
+            fi
+            ;;
+    esac
+
+    [[ -n "$REPO_CODENAME" ]] || die "Could not detect OS codename."
+    [[ "$os_codename" == "$REPO_CODENAME" ]] \
+        || info "Derivative ${os_id} (${os_codename}) -> using ${REPO_ID}/${REPO_CODENAME} packages"
+}
+
 step_install_fluent_bit() {
     print_section "Installing Fluent Bit"
 
@@ -200,14 +260,12 @@ step_install_fluent_bit() {
     curl -fsSL https://packages.fluentbit.io/fluentbit.key \
         | gpg --dearmor > /usr/share/keyrings/fluentbit-keyring.gpg
 
-    local codename
-    codename=$(grep -oP '(?<=VERSION_CODENAME=).*' /etc/os-release)
-    [[ -n "$codename" ]] || die "Could not detect OS codename."
+    detect_repo_base
 
     echo "deb [signed-by=/usr/share/keyrings/fluentbit-keyring.gpg] \
-https://packages.fluentbit.io/debian/${codename} ${codename} main" \
+https://packages.fluentbit.io/${REPO_ID}/${REPO_CODENAME} ${REPO_CODENAME} main" \
         | tee /etc/apt/sources.list.d/fluent-bit.list > /dev/null
-    ok "Repository added: debian/${codename}"
+    ok "Repository added: ${REPO_ID}/${REPO_CODENAME}"
 
     apt-get update -qq
     DEBIAN_FRONTEND=noninteractive apt-get install -y -qq fluent-bit
