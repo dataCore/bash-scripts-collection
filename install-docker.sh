@@ -16,7 +16,7 @@
 #   192.168.20.11  →  last octet: 11  →  172.11.0.0/16  +  fd00:172:11::/64
 #   10.7.0.30      →  last octet: 30  →  172.30.0.0/16  +  fd00:172:30::/64
 #
-# Repository: https://code.geek.ch/dataCore/bash-scripts-collection
+# Repository: https://github.com/dataCore/bash-scripts-collection
 # =============================================================================
 
 set -euo pipefail

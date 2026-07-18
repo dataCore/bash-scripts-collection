@@ -43,7 +43,7 @@
 #   install-log.sh --host log.it-processing.ch --docker --proxmox
 #   install-log.sh --host log.geek.ch --unifi --user o2-agent@geek.ch
 #
-# Repository: https://code.geek.ch/dataCore/bash-scripts-collection
+# Repository: https://github.com/dataCore/bash-scripts-collection
 # =============================================================================
 
 set -euo pipefail

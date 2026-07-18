@@ -21,7 +21,7 @@
 #   8. Harden sshd_config (AllowGroups, key-only, no root, etc.)
 #   9. Install pubkeys/<username>.pub as authorized_keys for <username>
 #
-# Repository: https://code.geek.ch/dataCore/bash-scripts-collection
+# Repository: https://github.com/dataCore/bash-scripts-collection
 # =============================================================================
 
 set -euo pipefail

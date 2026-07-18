@@ -1,7 +1,7 @@
 #!/bin/bash
 # =============================================================================
 # check-cve – geek.ch Security Check Script
-# Repository: https://code.geek.ch/dataCore/bash-scripts-collection
+# Repository: https://github.com/dataCore/bash-scripts-collection
 #
 # Checks for active exposure to:
 #   CVE-2026-31431  "Copy Fail"   – algif_aead kernel module (AF_ALG)

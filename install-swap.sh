@@ -46,7 +46,7 @@
 # container. Set the swap on the host instead:
 #   pct set <ctid> -swap 2048          # MB, 0 disables swap for the CT
 #
-# Repository: https://code.geek.ch/dataCore/bash-scripts-collection
+# Repository: https://github.com/dataCore/bash-scripts-collection
 # =============================================================================
 
 set -euo pipefail
