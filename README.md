@@ -16,6 +16,7 @@ This repository contains a collection of useful Bash scripts for managing Docker
 | `install-docker.sh` | | Installs Docker CE. Auto-derives Docker subnet from host IP (last octet). Configures IPv4/IPv6 pools, log limits, and NFS support. |
 | `install-mon.sh` | `<monitoring-server>` | Installs and configures Zabbix Agent2 with PSK encryption. Generates PSK key and prints copy-paste config for Zabbix frontend. |
 | `install-log.sh` | `--host <fqdn> [--docker] [--proxmox] [--unifi] [--user <email>] [--pass <secret>] [--vlan <id>] [--org <name>]` | Installs Fluent Bit and ships logs to an OpenObserve server. Source configs in `logconfs/` (linux always, docker/proxmox/unifi optional). Auto-detects IP and VLAN. |
+| `install-swap.sh` | `[--size <n>] [--swappiness <n>] [--remove-old] [--fix-resume] [--dry-run]` | Configures `/pagefile.sys` swap. Size auto-derived from RAM (<2G→2G, 2-8G→RAM, >8G→8G), persistent fstab entry and persistent `vm.swappiness` (default 10 = server). `--remove-old` deactivates old swap partitions/files and cleans up fstab. Refuses to run inside LXC containers (points to `pct set <ctid> -swap`). |
 
 ### 💾 Backup & Restore
 
@@ -61,6 +62,7 @@ bash-scripts-collection/
 ├── install-log.sh
 ├── install-mon.sh
 ├── install-ssh.sh
+├── install-swap.sh
 ├── link.sh
 ├── restore-docker.sh
 ├── show-lastreboot.sh
@@ -112,10 +114,13 @@ install-mon dataCoreMonitor
 # or for ITP:
 install-mon itpmonitor
 
-# 4. Log shipping (optional)
+# 4. Swap file + swappiness (auto size from RAM)
+install-swap
+
+# 5. Log shipping (optional)
 install-log --host log.example.ch --docker
 
-# 5. CVE quick check
+# 6. CVE quick check
 check-cve
 ```
 

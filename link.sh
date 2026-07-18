@@ -11,6 +11,7 @@ scripts=(
     "install-log.sh:install-log"
     "install-mon.sh:install-mon"
     "install-ssh.sh:install-ssh"
+    "install-swap.sh:install-swap"
     "restore-docker.sh:restore-docker"
     "show-lastreboot.sh:show-lastreboot"
     "update-docker.sh:update-docker"
