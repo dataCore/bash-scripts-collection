@@ -297,7 +297,7 @@ step_deploy_main_config() {
 [SERVICE]
     Flush           5
     Daemon          Off
-    Log_Level       info
+    Log_Level       warn
     HTTP_Server     Off
     Parsers_File    /etc/fluent-bit/parsers.conf
 
@@ -445,9 +445,10 @@ step_summary() {
     printf "  ${BOLD}%-28s${NC} %s\n" "conf.d:"         "${FLUENT_BIT_CONFD}"
     printf "  ${BOLD}%-28s${NC} %s\n" "Log:"            "${LOG_FILE}"
     echo ""
-    info "Verify locally (look for HTTP status=200):"
+    info "Verify locally — at Log_Level warn the journal stays quiet unless"
+    info "something is wrong, so no output means the agent is healthy:"
     echo -e "    ${CYAN}journalctl -u fluent-bit -f${NC}"
-    echo -e "    ${CYAN}logger 'install-log test'${NC}"
+    echo -e "    ${CYAN}logger 'install-log test'   # then confirm it in OpenObserve below${NC}"
     echo ""
     info "Verify in OpenObserve (from an admin host with UI access):"
     echo -e "    ${CYAN}https://${O2_HOST}${NC} -> Logs -> syslog -> host = '$(hostname)'"
