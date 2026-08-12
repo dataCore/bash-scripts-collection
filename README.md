@@ -1,143 +1,95 @@
-# 📦 dataCore's Bash Scripts Collection
+# bash-scripts-collection
 
-This repository contains a collection of useful Bash scripts for managing Docker containers, SSH hardening, monitoring, logging, and general system tasks. These scripts simplify backup, restore, installation, and updates for Docker and Linux systems in general. Additionally there are some useful utility scripts.
+Bash scripts for provisioning and maintaining Debian-based servers: SSH hardening,
+Docker installation, monitoring and log agents, swap setup, Docker Compose backup and
+restore, and unattended system updates.
 
-⚠️ Usage at your own risk.
-📝 License: MIT (give me a beer)
+Written for Debian 12/13 and Proxmox hosts. Use at your own risk.
+License: MIT.
 
-
-## 🗂️ Contents
-
-### 🔧 Installation & Setup
-
-| Script | Parameters | Description |
-|---|---|---|
-| `install-ssh.sh` | `<username> [--bantime <duration>]` | Full SSH hardening: installs openssh-server, figlet banner, fail2ban, sudo, ssh-users group, authorized_keys. Public keys loaded from `pubkeys/<username>.pub`. |
-| `install-docker.sh` | | Installs Docker CE. Auto-derives Docker subnet from host IP (last octet). Configures IPv4/IPv6 pools, log limits, and NFS support. |
-| `install-mon.sh` | `<monitoring-server>` | Installs and configures Zabbix Agent2 with PSK encryption. Generates PSK key and prints copy-paste config for Zabbix frontend. |
-| `install-log.sh` | `--host <fqdn> [--docker] [--proxmox] [--unifi] [--user <email>] [--pass <secret>] [--vlan <id>] [--org <name>]` | Installs Fluent Bit and ships logs to an OpenObserve server. Source configs in `logconfs/` (linux always, docker/proxmox/unifi optional). Auto-detects IP and VLAN. Writes its own `/etc/fluent-bit/datacore.conf` + `datacore.env` and points the service there via a systemd drop-in — the packaged `fluent-bit.conf` stays untouched, so `apt upgrade` never hits a conffile conflict. |
-| `install-swap.sh` | `[--size <n>] [--swappiness <n>] [--remove-old] [--fix-resume] [--dry-run]` | Configures `/pagefile.sys` swap. Size auto-derived from RAM (<2G→2G, 2-8G→RAM, >8G→8G), persistent fstab entry and persistent `vm.swappiness` (default 10 = server). `--remove-old` deactivates old swap partitions/files and cleans up fstab. Refuses to run inside LXC containers (points to `pct set <ctid> -swap`). |
-
-### 💾 Backup & Restore
-
-| Script | Parameters | Description |
-|---|---|---|
-| `backup-docker.sh` | `{PROJECT} {BACKUPDIR:/mnt/backup/} {DAYS:2}` | Creates a backup of a single Docker Compose project: compose config, volumes, and databases (MariaDB, MySQL, PostgreSQL, MongoDB, GitLab). |
-| `backup-docker-all.sh` | `{BACKUPDIR:/mnt/backup/} {DAYS:2} {PBS_REPO}` | Creates backups of all running Docker Compose projects, optionally uploads to Proxmox Backup Server. |
-| `restore-docker.sh` | `{BACKUPDIR:/mnt/backup/}` | Interactively restores a Docker Compose project from a backup. Run from the project directory. |
-| `backup-remoteserver.sh` | `<remote-ip> <remote-path>` | Backs up a remote path to a Proxmox Backup Server via SSH reverse tunnel. Credentials in `/etc/backup-remoteserver.conf`. |
-
-### 🔄 Updates
-
-| Script | Parameters | Description |
-|---|---|---|
-| `update-docker.sh` | `{PROJECT} --auto={y,n,b}` | Updates a single Docker Compose project. Auto-restart: yes, no, or with backup first. Warns on pending git changes in the project directory. |
-| `update-docker-all.sh` | | Updates all running Docker Compose projects with `--auto=y`, then prunes unused images. |
-| `update-system.sh` | `[-y]` | Full Linux system update (dist-upgrade). `-y` triggers automatic reboot if required (detects pending kernel on Debian and Proxmox). Also updates the scripts collection itself. |
-| `update-scripts.sh` | | Updates this scripts collection via git pull (hard-resets to `origin/main` on conflict) and re-links the scripts. |
-
-### 🛡️ Security
-
-| Script | Parameters | Description |
-|---|---|---|
-| `check-cve.sh` | `[--fix] [--json]` | Checks the host for exposure to current Linux kernel/userspace CVEs (Copy Fail, Dirty Frag, Fragnesia, CrackArmor, ptrace mm-NULL, CIFSwitch). `--fix` applies module blacklists and sysctl mitigations, `--json` gives machine-readable output. |
-
-### 🛠️ Utilities
-
-| Script | Parameters | Description |
-|---|---|---|
-| `show-lastreboot.sh` | | Displays the last system reboot time. |
-| `link.sh` | | Creates symbolic links for all scripts into `/usr/bin/` (run once after install). |
-
-
-## 📁 Repository Structure
-
-```
-bash-scripts-collection/
-├── backup-docker.sh
-├── backup-docker-all.sh
-├── backup-remoteserver.sh
-├── check-cve.sh
-├── install-docker.sh
-├── install-log.sh
-├── install-mon.sh
-├── install-ssh.sh
-├── install-swap.sh
-├── link.sh
-├── restore-docker.sh
-├── show-lastreboot.sh
-├── update-docker.sh
-├── update-docker-all.sh
-├── update-scripts.sh
-├── update-system.sh
-├── logconfs/             ← Fluent Bit source configs for install-log.sh
-│   ├── linux.conf
-│   ├── docker.conf
-│   ├── proxmox.conf
-│   ├── unifi.conf
-│   └── windows.conf
-├── pubkeys/              ← SSH public keys per user for install-ssh.sh
-│   ├── datacore.pub
-│   └── itp.pub
-└── README.md
-```
-
-
-## 🛠️ Installation
+## Installation
 
 ```bash
-# Create folder and clone
 sudo mkdir -p /usr/bin/datacore/bash
 git clone https://github.com/dataCore/bash-scripts-collection.git /usr/bin/datacore/bash/
-
-# Link all scripts to /usr/bin/
 bash /usr/bin/datacore/bash/link.sh
-
-# Test
-show-lastreboot
 ```
 
+`link.sh` symlinks every script into `/usr/bin/` without the `.sh` suffix, so
+`install-ssh.sh` is called as `install-ssh`. Verify with `show-lastreboot`.
 
-## 🚀 Fresh Debian Server Setup
+## Scripts
 
-Recommended order for setting up a new Debian 13 system:
+### Installation and setup
+
+| Script | Parameters | Description |
+|---|---|---|
+| `install-ssh.sh` | `<username> [--bantime <duration>]` | SSH hardening: openssh-server, figlet banner, fail2ban, sudo, `ssh-users` group, authorized_keys. Public keys are read from `pubkeys/<username>.pub`. |
+| `install-docker.sh` | | Installs Docker CE. Derives the Docker subnet from the last octet of the host IP, configures IPv4/IPv6 address pools, log limits and NFS support. |
+| `install-mon.sh` | `<monitoring-server>` | Installs Zabbix Agent2 with PSK encryption, generates the PSK and prints the matching host configuration for the Zabbix frontend. |
+| `install-log.sh` | `--host <fqdn> [--docker] [--proxmox] [--unifi] [--user <email>] [--pass <secret>] [--vlan <id>] [--org <name>]` | Installs Fluent Bit and ships logs to OpenObserve. Source configs live in `logconfs/` (`linux` always, the rest on demand). IP and VLAN are auto-detected. Configuration is written to `/etc/fluent-bit/datacore.conf` and `datacore.env` and wired in through a systemd drop-in, so the packaged `fluent-bit.conf` stays untouched and `apt upgrade` never triggers a conffile prompt. |
+| `install-swap.sh` | `[--size <n>] [--swappiness <n>] [--remove-old] [--fix-resume] [--dry-run]` | Sets up `/pagefile.sys` including fstab entry and persistent `vm.swappiness` (default 10). Size defaults to RAM, capped at 8G and floored at 2G. `--remove-old` disables previous swap partitions or files and cleans up fstab. Refuses to run inside LXC containers, where `pct set <ctid> -swap` is the correct tool. |
+
+### Backup and restore
+
+| Script | Parameters | Description |
+|---|---|---|
+| `backup-docker.sh` | `{PROJECT} {BACKUPDIR:/mnt/backup/} {DAYS:2}` | Backs up one Docker Compose project: compose configuration, volumes and databases (MariaDB, MySQL, PostgreSQL, MongoDB, GitLab). |
+| `backup-docker-all.sh` | `{BACKUPDIR:/mnt/backup/} {DAYS:2} {PBS_REPO}` | Backs up all running Compose projects, optionally uploading to a Proxmox Backup Server. |
+| `restore-docker.sh` | `{BACKUPDIR:/mnt/backup/}` | Interactive restore of a Compose project. Run from the project directory. |
+| `backup-remoteserver.sh` | `<remote-ip> <remote-path>` | Backs up a remote path to a Proxmox Backup Server through an SSH reverse tunnel. Credentials in `/etc/backup-remoteserver.conf`. |
+
+### Updates
+
+| Script | Parameters | Description |
+|---|---|---|
+| `update-docker.sh` | `{PROJECT} --auto={y,n,b}` | Updates one Compose project. `--auto` controls the restart: yes, no, or backup first. Warns about uncommitted changes in the project directory. |
+| `update-docker-all.sh` | | Updates all running Compose projects with `--auto=y`, then prunes unused images. |
+| `update-system.sh` | `[-y]` | Full `dist-upgrade`. With `-y` reboots automatically when required; pending kernel updates are detected on Debian and Proxmox. Also updates this collection. |
+| `update-scripts.sh` | | Updates this collection via `git pull`, hard-resetting to `origin/main` on conflict, and re-runs `link.sh`. |
+
+### Security
+
+| Script | Parameters | Description |
+|---|---|---|
+| `check-cve.sh` | `[--fix] [--json]` | Checks the host against current kernel and userspace CVEs (Copy Fail, Dirty Frag, Fragnesia, CrackArmor, ptrace mm-NULL, CIFSwitch). `--fix` applies module blacklists and sysctl mitigations, `--json` produces machine-readable output. |
+
+### Utilities
+
+| Script | Parameters | Description |
+|---|---|---|
+| `show-lastreboot.sh` | | Prints the time of the last reboot. |
+| `link.sh` | | Symlinks all scripts into `/usr/bin/`. Run once after cloning. |
+
+## Data directories
+
+| Directory | Used by | Contents |
+|---|---|---|
+| `logconfs/` | `install-log.sh` | Fluent Bit input configs: `linux.conf`, `docker.conf`, `proxmox.conf`, `unifi.conf`, `windows.conf`. |
+| `pubkeys/` | `install-ssh.sh` | One SSH public key file per user, named `<username>.pub`. |
+
+## Provisioning a new server
+
+Order used for a fresh Debian 13 install:
 
 ```bash
-# 1. SSH hardening, sudo, fail2ban, authorized_keys
-install-ssh datacore [--bantime 30m]
-
-# 2. Docker CE (if needed)
-install-docker
-
-# 3. Monitoring agent
-install-mon dataCoreMonitor
-# or for ITP:
-install-mon itpmonitor
-
-# 4. Swap file + swappiness (auto size from RAM)
-install-swap
-
-# 5. Log shipping (optional)
+install-ssh datacore --bantime 30m     # SSH hardening, sudo, fail2ban, keys
+install-docker                          # only where containers run
+install-mon dataCoreMonitor             # Zabbix agent; itpmonitor for ITP hosts
+install-swap                            # swap file, size derived from RAM
 install-log --host log.example.ch --docker
-
-# 6. CVE quick check
 check-cve
 ```
 
-
-## ⏰ Cronjobs
-
-Standard cron setup for automated backups and updates:
+## Cron
 
 ```bash
-# Edit with: crontab -e
+# Only required when uploading to a Proxmox Backup Server:
+PBS_PASSWORD="..."
+PBS_FINGERPRINT="..."
 
-# Only needed when uploading to Proxmox Backup Server:
-PBS_PASSWORD="YourPBSPassword"
-PBS_FINGERPRINT="Your:PBS:Fingerprint"
-
-# m  h    dom mon dow   command
-03  03  *  *  *    backup-docker-all '/mnt/backup' 0 > /var/log/dataCoreBackupScript.log
-03  05  *  *  03   update-system -y > /var/log/dataCoreUpdateScript.log
-43  05  *  *  03   update-docker-all > /var/log/dataCoreUpdateDockerScript.log
+# m   h   dom mon dow   command
+  03  03   *   *   *    backup-docker-all '/mnt/backup' 0 > /var/log/dataCoreBackupScript.log
+  03  05   *   *   03   update-system -y > /var/log/dataCoreUpdateScript.log
+  43  05   *   *   03   update-docker-all > /var/log/dataCoreUpdateDockerScript.log
 ```
