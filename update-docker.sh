@@ -38,13 +38,23 @@ if [ -z "$WORKINGDIR" ] || [ ! -d "$WORKINGDIR" ]; then
 fi
 
 # =======================================================================
-# Check for pending git changes in the working directory
+# Check the working directory against its Git remote
 # =======================================================================
 cd "$WORKINGDIR"
 
 if git -C "$WORKINGDIR" rev-parse --is-inside-work-tree &>/dev/null; then
     GIT_STATUS=$(git -C "$WORKINGDIR" status --porcelain 2>/dev/null)
+
+    # Refresh the remote-tracking ref so local and remote can be compared.
+    # Read-only, never touches the working tree. Prompts are disabled and the
+    # whole thing is time-boxed so an unattended run cannot hang on a private
+    # repo or an unreachable remote — if the fetch fails, the comparison below
+    # simply falls back to the last known state of the remote.
+    GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND='ssh -o BatchMode=yes' \
+        timeout 20 git -C "$WORKINGDIR" fetch --quiet &>/dev/null || true
+
     GIT_UNPUSHED=$(git -C "$WORKINGDIR" log "@{u}.." --oneline 2>/dev/null || true)
+    GIT_BEHIND=$(git -C "$WORKINGDIR" log "..@{u}" --oneline 2>/dev/null || true)
 
     if [ -n "$GIT_STATUS" ] || [ -n "$GIT_UNPUSHED" ]; then
         echo "⚠️  WARNING: Pending Git changes detected in '${WORKINGDIR}'!"
@@ -56,6 +66,14 @@ if git -C "$WORKINGDIR" rev-parse --is-inside-work-tree &>/dev/null; then
             echo "   Unpushed commits:"
             echo "     ${GIT_UNPUSHED//$'\n'/$'\n'     }"
         fi
+    fi
+
+    if [ -n "$GIT_BEHIND" ]; then
+        echo "⚠️  WARNING: '${WORKINGDIR}' is behind its Git remote!"
+        echo "   Missing commits:"
+        echo "     ${GIT_BEHIND//$'\n'/$'\n'     }"
+        echo "   Run 'git -C ${WORKINGDIR} pull' first — the containers would"
+        echo "   otherwise be updated against an outdated compose file."
     fi
 fi
 

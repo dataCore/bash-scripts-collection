@@ -43,7 +43,7 @@ bash /usr/bin/datacore/bash/link.sh
 
 | Script | Parameters | Description |
 |---|---|---|
-| `update-docker.sh` | `{PROJECT} --auto={y,n,b}` | Updates one Compose project. `--auto` controls the restart: yes, no, or backup first. Warns about uncommitted changes in the project directory. |
+| `update-docker.sh` | `{PROJECT} --auto={y,n,b}` | Updates one Compose project. `--auto` controls the restart: yes, no, or backup first. Warns when the project directory has uncommitted or unpushed changes, and when it is behind its Git remote and should be pulled before the containers are updated. |
 | `update-docker-all.sh` | | Updates all running Compose projects with `--auto=y`, then prunes unused images. |
 | `update-system.sh` | `[-y]` | Full `dist-upgrade`. With `-y` reboots automatically when required; pending kernel updates are detected on Debian and Proxmox. Also updates this collection. |
 | `update-scripts.sh` | | Updates this collection via `git pull`, hard-resetting to `origin/main` on conflict, and re-runs `link.sh`. |
