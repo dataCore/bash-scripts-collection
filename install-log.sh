@@ -40,6 +40,7 @@
 #   --docker          Include Docker log collection (requires Docker)
 #   --proxmox         Include Proxmox task log collection
 #   --unifi           Include UniFi syslog receiver (UDP 5140)
+#   --bmc             Include BMC/IPMI syslog receiver (UDP 5141)
 #
 # Optional overrides (otherwise prompted / auto-detected):
 #   --user <email>    OpenObserve ingest user
@@ -89,6 +90,7 @@ SCRIPT_DIR="$(cd "$(dirname "$SOURCE")" && pwd)"
 OPT_DOCKER=false
 OPT_PROXMOX=false
 OPT_UNIFI=false
+OPT_BMC=false
 
 O2_HOST=""
 O2_USER=""
@@ -169,6 +171,7 @@ parse_args() {
             --docker)    OPT_DOCKER=true; shift ;;
             --proxmox)   OPT_PROXMOX=true; shift ;;
             --unifi)     OPT_UNIFI=true; shift ;;
+            --bmc)       OPT_BMC=true; shift ;;
             -h|--help)   usage 0 ;;
             *) die "Unknown argument: $1 (use --help)" ;;
         esac
@@ -409,6 +412,7 @@ EOF
     $OPT_DOCKER  && includes+="@INCLUDE ${CONFD}/docker.conf\n"
     $OPT_PROXMOX && includes+="@INCLUDE ${CONFD}/proxmox.conf\n"
     $OPT_UNIFI   && includes+="@INCLUDE ${CONFD}/unifi.conf\n"
+    $OPT_BMC     && includes+="@INCLUDE ${CONFD}/bmc.conf\n"
 
     cat > "$DC_CONF" <<EOF
 # =============================================================================
@@ -472,6 +476,10 @@ step_deploy_confd() {
     if $OPT_UNIFI; then
         cp "${confd_source}/unifi.conf" "${CONFD}/unifi.conf"
         ok "Deployed: unifi.conf"
+    fi
+    if $OPT_BMC; then
+        cp "${confd_source}/bmc.conf" "${CONFD}/bmc.conf"
+        ok "Deployed: bmc.conf"
     fi
 }
 
@@ -596,6 +604,7 @@ step_summary() {
     $OPT_DOCKER  && active_configs+=", docker"
     $OPT_PROXMOX && active_configs+=", proxmox"
     $OPT_UNIFI   && active_configs+=", unifi"
+    $OPT_BMC     && active_configs+=", bmc"
 
     echo ""
     echo -e "  ${GREEN}${BOLD}✓ Fluent Bit installation complete!${NC}"
