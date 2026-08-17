@@ -25,6 +25,7 @@
 # Files owned by this script:
 #   /etc/fluent-bit/datacore.conf                     main config (no secrets)
 #   /etc/fluent-bit/datacore.env                      credentials, chmod 600
+#   /etc/fluent-bit/datacore-parsers.conf             custom parsers
 #   /etc/fluent-bit/conf.d/*.conf                     inputs/outputs per source
 #   /etc/systemd/system/fluent-bit.service.d/datacore.conf   ExecStart override
 #
@@ -72,6 +73,7 @@ BLUE='\033[0;34m'; CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
 PKG_CONF="/etc/fluent-bit/fluent-bit.conf"      # package conffile — never edited
 DC_CONF="/etc/fluent-bit/datacore.conf"
 DC_ENV="/etc/fluent-bit/datacore.env"
+DC_PARSERS="/etc/fluent-bit/datacore-parsers.conf"
 CONFD="/etc/fluent-bit/conf.d"
 PARSERS_CONF="/etc/fluent-bit/parsers.conf"
 DROPIN_DIR="/etc/systemd/system/fluent-bit.service.d"
@@ -437,6 +439,7 @@ EOF
     Log_Level       warn
     HTTP_Server     Off
     Parsers_File    ${PARSERS_CONF}
+    Parsers_File    ${DC_PARSERS}
 
 # =============================================================================
 # Host-specific settings
@@ -465,6 +468,9 @@ step_deploy_confd() {
 
     local confd_source="${SCRIPT_DIR}/logconfs"
     [[ -d "$confd_source" ]] || die "logconfs directory not found at ${confd_source}."
+
+    cp "${confd_source}/datacore-parsers.conf" "$DC_PARSERS"
+    ok "Deployed: datacore-parsers.conf"
 
     cp "${confd_source}/linux.conf" "${CONFD}/linux.conf"
     ok "Deployed: linux.conf"
