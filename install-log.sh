@@ -41,6 +41,7 @@
 #   --proxmox         Include Proxmox task log collection
 #   --unifi           Include UniFi syslog receiver (UDP 5140)
 #   --bmc             Include BMC/IPMI syslog receiver (UDP 5141)
+#   --truenas         Include TrueNAS syslog receiver (UDP 5142)
 #
 # Optional overrides (otherwise prompted / auto-detected):
 #   --user <email>    OpenObserve ingest user
@@ -91,6 +92,7 @@ OPT_DOCKER=false
 OPT_PROXMOX=false
 OPT_UNIFI=false
 OPT_BMC=false
+OPT_TRUENAS=false
 
 O2_HOST=""
 O2_USER=""
@@ -172,6 +174,7 @@ parse_args() {
             --proxmox)   OPT_PROXMOX=true; shift ;;
             --unifi)     OPT_UNIFI=true; shift ;;
             --bmc)       OPT_BMC=true; shift ;;
+            --truenas)   OPT_TRUENAS=true; shift ;;
             -h|--help)   usage 0 ;;
             *) die "Unknown argument: $1 (use --help)" ;;
         esac
@@ -413,6 +416,7 @@ EOF
     $OPT_PROXMOX && includes+="@INCLUDE ${CONFD}/proxmox.conf\n"
     $OPT_UNIFI   && includes+="@INCLUDE ${CONFD}/unifi.conf\n"
     $OPT_BMC     && includes+="@INCLUDE ${CONFD}/bmc.conf\n"
+    $OPT_TRUENAS && includes+="@INCLUDE ${CONFD}/truenas.conf\n"
 
     cat > "$DC_CONF" <<EOF
 # =============================================================================
@@ -480,6 +484,10 @@ step_deploy_confd() {
     if $OPT_BMC; then
         cp "${confd_source}/bmc.conf" "${CONFD}/bmc.conf"
         ok "Deployed: bmc.conf"
+    fi
+    if $OPT_TRUENAS; then
+        cp "${confd_source}/truenas.conf" "${CONFD}/truenas.conf"
+        ok "Deployed: truenas.conf"
     fi
 }
 
@@ -605,6 +613,7 @@ step_summary() {
     $OPT_PROXMOX && active_configs+=", proxmox"
     $OPT_UNIFI   && active_configs+=", unifi"
     $OPT_BMC     && active_configs+=", bmc"
+    $OPT_TRUENAS && active_configs+=", truenas"
 
     echo ""
     echo -e "  ${GREEN}${BOLD}✓ Fluent Bit installation complete!${NC}"
