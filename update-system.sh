@@ -10,6 +10,7 @@
 # HISTORY
 # 2024-04-15 Initial Version
 # 2026-05-01 Fix reboot detection for Proxmox (proxmox-kernel-* package names)
+# 2026-08-19 Fix "reboot: command not found" (sbin missing from PATH)
 #
 # =======================================================================
 # START script
@@ -31,6 +32,23 @@ done
 
 # Deactivate interactive menues
 export DEBIAN_FRONTEND=noninteractive
+
+# Make sure the sbin directories are in PATH. Started from cron, "su" or a
+# sudo setup with a sanitized secure_path, /sbin and /usr/sbin can be missing
+# and tools like "reboot" are not found.
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
+
+# Reboot the machine, whatever the init system provides.
+do_reboot() {
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl reboot
+    elif command -v reboot >/dev/null 2>&1; then
+        reboot
+    else
+        echo "Error: no reboot command found. Please reboot manually."
+        exit 1
+    fi
+}
 
 # Update the script collection
 update-scripts
@@ -63,12 +81,12 @@ if [ -f /var/run/reboot-required ] || \
    { [ -n "$NEWEST_KERNEL" ] && [ "$(uname -r | sed -E 's/-pve$//')" != "$NEWEST_KERNEL" ]; }; then
     if [ "$AUTO_REBOOT" = true ]; then
         echo "[✓] Auto-confirm enabled. Rebooting now..."
-        reboot
+        do_reboot
     else
         read -r -p "Reboot required (running: $(uname -r) → newest: $NEWEST_KERNEL). Reboot now? (y/n): " answer
         if [ "$answer" = "y" ] || [ "$answer" = "Y" ]; then
             echo "[✓] Rebooting now..."
-            reboot
+            do_reboot
         else
             echo "[i] Reboot skipped. Running: $(uname -r) → Newest: $NEWEST_KERNEL"
         fi
