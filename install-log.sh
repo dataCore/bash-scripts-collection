@@ -28,6 +28,7 @@
 #   /etc/fluent-bit/datacore-parsers.conf             custom parsers
 #   /etc/fluent-bit/conf.d/*.conf                     inputs/outputs per source
 #   /var/lib/fluent-bit/storage/                      on-disk buffer (storage.path)
+#   /var/lib/fluent-bit/systemd.db                    journal cursor (linux.conf)
 #   /etc/systemd/system/fluent-bit.service.d/datacore.conf   ExecStart override
 #
 # Required:
@@ -399,6 +400,7 @@ step_deploy_config() {
     print_section "Deploying dataCore Config"
 
     mkdir -p "$CONFD"
+    # Also creates the parent /var/lib/fluent-bit, home of the systemd cursor DB
     install -d -m 750 "$STORAGE_DIR"
 
     # Credentials live in an env file read by systemd, not in the config:
