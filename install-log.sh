@@ -27,12 +27,14 @@
 #   /etc/fluent-bit/datacore.env                      credentials, chmod 600
 #   /etc/fluent-bit/datacore-parsers.conf             custom parsers
 #   /etc/fluent-bit/conf.d/*.conf                     inputs/outputs per source
+#   /var/lib/fluent-bit/storage/                      on-disk buffer (storage.path)
 #   /etc/systemd/system/fluent-bit.service.d/datacore.conf   ExecStart override
 #
 # Required:
 #   --host <fqdn>     OpenObserve endpoint, e.g. log.geek.ch
-#                     Always the Traefik FQDN, for internal hosts too: the
-#                     ingest API (/api/) is public, the UI is internal-only.
+#                     Always the Traefik FQDN, for internal hosts too: only
+#                     the ingest endpoints (POST /api/<org>/<stream>/_json)
+#                     are public, UI and the rest of the API are internal-only.
 #                     The container publishes no host port, and Traefik routes
 #                     on Host(log.geek.ch) — so the internal name datacorelog
 #                     does not work (no route, no matching TLS cert).
@@ -79,6 +81,7 @@ PARSERS_CONF="/etc/fluent-bit/parsers.conf"
 DROPIN_DIR="/etc/systemd/system/fluent-bit.service.d"
 DROPIN="${DROPIN_DIR}/datacore.conf"
 DAEMON_JSON="/etc/docker/daemon.json"
+STORAGE_DIR="/var/lib/fluent-bit/storage"       # filesystem buffer (storage.path)
 LOG_FILE="/var/log/datacore-install.log"
 # Resolve real script location even when called via symlink (e.g. from link.sh)
 SOURCE="${BASH_SOURCE[0]}"
@@ -391,6 +394,7 @@ step_deploy_config() {
     print_section "Deploying dataCore Config"
 
     mkdir -p "$CONFD"
+    install -d -m 750 "$STORAGE_DIR"
 
     # Credentials live in an env file read by systemd, not in the config:
     # that keeps datacore.conf readable for debugging and the secret in one
@@ -440,6 +444,13 @@ EOF
     HTTP_Server     Off
     Parsers_File    ${PARSERS_CONF}
     Parsers_File    ${DC_PARSERS}
+    # Buffer chunks on disk so a log server outage does not lose records.
+    # Inputs opt in via "storage.type filesystem", outputs cap their backlog
+    # with "storage.total_limit_size" (oldest chunks are dropped first).
+    storage.path              ${STORAGE_DIR}
+    storage.sync              normal
+    storage.max_chunks_up     128
+    storage.backlog.mem_limit 16M
 
 # =============================================================================
 # Host-specific settings
