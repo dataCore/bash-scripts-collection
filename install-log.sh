@@ -238,10 +238,15 @@ step_get_credentials() {
     echo ""
     info "Verifying credentials against https://${O2_HOST}..."
     local http_status
+    # Check against the ingest endpoint with an empty batch: it is the only
+    # part of the API reachable from every network (the rest is internal-only,
+    # a host outside those ranges would get 403 with valid credentials). An
+    # empty array writes nothing and creates no stream; bad credentials -> 401.
     # Pass credentials via stdin config so they don't show up in the process list
     http_status=$(curl -s -o /dev/null -w "%{http_code}" \
         --config - \
-        "https://${O2_HOST}/api/${O2_ORG}/streams" \
+        -X POST -H "Content-Type: application/json" -d '[]' \
+        "https://${O2_HOST}/api/${O2_ORG}/syslog/_json" \
         <<< "user = \"${O2_USER}:${O2_PASSWD}\"" || echo "000")
 
     if [[ "$http_status" == "200" ]]; then
