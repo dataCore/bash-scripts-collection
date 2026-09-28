@@ -338,9 +338,10 @@ elif [[ "$SELECTED" == *.mongodump.archive.gz || "$SELECTED" == *.mongodump.sql.
     echo "🍃 Restoring MongoDB..."
     compose_up "$SERVICENAME"
     wait_healthy "$SERVICENAME" mongo
-    # Fixed: use $CONTAINERNAME (not the undefined $CONTAINER variable)
+    # `mongodump --archive --gzip` gzips the whole archive stream: unpack it here
+    # and hand mongorestore a plain archive (--gzip on top fails: invalid header).
     gunzip -c "$SELECTED" | docker compose exec -T "$SERVICENAME" \
-        sh -c 'mongorestore --archive --gzip'
+        sh -c 'mongorestore --archive --drop'
     echo "✅ MongoDB restored"
 
 # =======================================================================

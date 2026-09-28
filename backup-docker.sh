@@ -120,6 +120,9 @@ declare -A DB_DONE
 
 for cont in $CONTAINERS; do
     IMAGE=$(docker inspect --format '{{.Config.Image}}' "$cont" 2>/dev/null)
+    # Image name without registry/namespace and tag: quay.io/wekan/mongo:4.4 -> mongo
+    IMAGE_NAME="${IMAGE##*/}"
+    IMAGE_NAME="${IMAGE_NAME%%[:@]*}"
     CONTAINERNAME=$(docker inspect --format '{{.Name}}' "$cont" 2>/dev/null | sed 's|^/||')
     # Only named Docker volumes (anonymous and bind mounts are excluded)
     VOLUMES=$(docker inspect \
@@ -179,7 +182,7 @@ for cont in $CONTAINERS; do
             commit_backup "$OUTPUT"
 
         # ---------------------------------------------------------------
-        elif echo "$IMAGE" | grep -qi "^mongo"; then
+        elif echo "$IMAGE_NAME" | grep -qiE "^(mongo|mongodb|mongodb-community-server)$"; then
             # BACKUP MongoDB: dump data volume, tar config volume
             if echo "$vol" | grep -qi "config"; then
                 OUTPUT="${TIMESTAMP}_${PROJECTNAME}.${VOLUMENAME}.volume.tar.gz"
