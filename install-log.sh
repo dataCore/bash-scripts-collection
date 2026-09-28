@@ -545,7 +545,18 @@ EOF
 # Step 6 — Configure Docker Logging Driver (optional)
 # =============================================================================
 step_configure_docker() {
-    $OPT_DOCKER || return 0
+    if ! $OPT_DOCKER; then
+        # Without --docker nothing listens on localhost:24224 any more. A
+        # fluentd log-driver left over from an earlier --docker run then fills
+        # its 1 MB async buffer and dockerd logs "Buffer full" for every
+        # container line (seen on dataCoreLog03, 2026-09-28).
+        if [[ -f "$DAEMON_JSON" ]] && python3 -c "import json,sys; sys.exit(0 if json.load(open('$DAEMON_JSON')).get('log-driver')=='fluentd' else 1)" 2>/dev/null; then
+            warn "${DAEMON_JSON} still uses the fluentd log-driver, but --docker is not set"
+            warn "Nothing listens on localhost:24224 - container logs are dropped and dockerd floods the journal"
+            warn "Either re-run with --docker, or set \"log-driver\": \"local\" (remove log-opts), restart Docker and recreate the containers"
+        fi
+        return 0
+    fi
     print_section "Configuring Docker Logging Driver"
 
     command -v docker &>/dev/null || die "Docker is not installed. Run install-docker.sh first."
