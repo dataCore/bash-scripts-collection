@@ -38,6 +38,19 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Write a SQL dump to stdout, decompressed by its extension (.sql.zst or .sql.gz).
+decompress() {
+    case "$1" in
+        *.zst)
+            if ! command -v zstd >/dev/null 2>&1; then
+                echo "❌ '$1' is zstd-compressed, but zstd is not installed (apt install zstd)." >&2
+                exit 1
+            fi
+            zstd -dcq "$1" ;;
+        *)  gunzip -c "$1" ;;
+    esac
+}
+
 # Start a compose service and surface a clear error if it fails.
 # docker compose up -d swallows the OCI/runc error text – we capture stderr
 # and print it explicitly so the operator knows what to fix.
@@ -182,9 +195,9 @@ for file in "$BACKUPDIR"/*"$PROJECTNAME"*; do
     filename=$(basename "$file")
     case "$filename" in
         *.compose.tar.gz)       COMPOSES+=("$filename") ;;
-        *.mariadbdump.sql.gz)   MARIADBS+=("$filename") ;;
-        *.mysqldump.sql.gz)     MYSQLS+=("$filename") ;;
-        *.postgredump.sql.gz)   POSTGRES+=("$filename") ;;
+        *.mariadbdump.sql.gz | *.mariadbdump.sql.zst) MARIADBS+=("$filename") ;;
+        *.mysqldump.sql.gz | *.mysqldump.sql.zst)     MYSQLS+=("$filename") ;;
+        *.postgredump.sql.gz | *.postgredump.sql.zst) POSTGRES+=("$filename") ;;
         *.mongodump.archive.gz | *.mongodump.sql.gz) MONGOS+=("$filename") ;;
         *.gitlabbackup.tar.gz)  GITLABS+=("$filename") ;;
         *.volume.tar.gz)        VOLUMES+=("$filename") ;;
@@ -281,7 +294,7 @@ if [[ "$SELECTED" == *.compose.tar.gz ]]; then
 
 # =======================================================================
 # RESTORE MariaDB
-elif [[ "$SELECTED" == *.mariadbdump.sql.gz ]]; then
+elif [[ "$SELECTED" == *.mariadbdump.sql.gz || "$SELECTED" == *.mariadbdump.sql.zst ]]; then
     echo "🐬 Restoring MariaDB..."
     compose_up "$SERVICENAME"
     wait_healthy "$SERVICENAME" mariadb
@@ -294,13 +307,13 @@ elif [[ "$SELECTED" == *.mariadbdump.sql.gz ]]; then
         echo "   Check the env_file / environment: section in your docker-compose.yml."
         exit 1
     fi
-    gunzip -c "$SELECTED" | docker compose exec -T "$SERVICENAME" \
+    decompress "$SELECTED" | docker compose exec -T "$SERVICENAME" \
         sh -c 'mariadb -u root -p"${MYSQL_ROOT_PASSWORD:-$DB_ROOT_PASSWORD}"'
     echo "✅ MariaDB restored"
 
 # =======================================================================
 # RESTORE MySQL
-elif [[ "$SELECTED" == *.mysqldump.sql.gz ]]; then
+elif [[ "$SELECTED" == *.mysqldump.sql.gz || "$SELECTED" == *.mysqldump.sql.zst ]]; then
     echo "🐬 Restoring MySQL..."
     compose_up "$SERVICENAME"
     wait_healthy "$SERVICENAME" mysql
@@ -311,13 +324,13 @@ elif [[ "$SELECTED" == *.mysqldump.sql.gz ]]; then
         echo "   Check the env_file / environment: section in your docker-compose.yml."
         exit 1
     fi
-    gunzip -c "$SELECTED" | docker compose exec -T "$SERVICENAME" \
+    decompress "$SELECTED" | docker compose exec -T "$SERVICENAME" \
         sh -c 'mysql -u root -p"${MYSQL_ROOT_PASSWORD:-$DB_ROOT_PASSWORD}"'
     echo "✅ MySQL restored"
 
 # =======================================================================
 # RESTORE PostgreSQL
-elif [[ "$SELECTED" == *.postgredump.sql.gz ]]; then
+elif [[ "$SELECTED" == *.postgredump.sql.gz || "$SELECTED" == *.postgredump.sql.zst ]]; then
     echo "🐘 Restoring PostgreSQL..."
     compose_up "$SERVICENAME"
     wait_healthy "$SERVICENAME" postgres
@@ -328,7 +341,7 @@ elif [[ "$SELECTED" == *.postgredump.sql.gz ]]; then
         exit 1
     fi
     echo "  Database: '${CONTAINERENV_DBNAME:-postgres}', User: '${CONTAINERENV_DBUSER}'"
-    gunzip -c "$SELECTED" | docker compose exec -T "$SERVICENAME" \
+    decompress "$SELECTED" | docker compose exec -T "$SERVICENAME" \
         psql -U "$CONTAINERENV_DBUSER" -d "${CONTAINERENV_DBNAME:-postgres}"
     echo "✅ PostgreSQL restored"
 

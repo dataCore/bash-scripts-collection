@@ -115,6 +115,17 @@ print_duration $(( $(date +%s) - START ))
 # BACKUP DOCKER VOLUMES AND DATABASES
 CONTAINERS=$(docker compose ps -q 2>/dev/null || true)
 
+# Compressor for SQL dumps: zstd uses every core and is far faster than gzip at
+# a similar ratio (a 14 GB PostgreSQL took 40+ min with gzip -9). Falls back to
+# gzip where zstd is not installed. restore-docker reads both.
+if command -v zstd >/dev/null 2>&1; then
+    DUMP_COMPRESS=(zstd -T0 -q)
+    DUMP_EXT="sql.zst"
+else
+    DUMP_COMPRESS=(gzip -6)
+    DUMP_EXT="sql.gz"
+fi
+
 # Track which DB containers we already dumped (avoid duplicate dumps per volume)
 declare -A DB_DONE
 
@@ -145,7 +156,7 @@ for cont in $CONTAINERS; do
             # BACKUP MariaDB – dump once per container, skip extra volumes
             if [ "${DB_DONE[$cont]+set}" ]; then continue; fi
             DB_DONE[$cont]=1
-            OUTPUT="${TIMESTAMP}_${PROJECTNAME}.${CONTAINERNAME}.mariadbdump.sql.gz"
+            OUTPUT="${TIMESTAMP}_${PROJECTNAME}.${CONTAINERNAME}.mariadbdump.${DUMP_EXT}"
             print_status "  🐬 MariaDB: ${OUTPUT}... "
             CONTAINERENV_DBPW=$(docker exec "${cont}" sh -c 'echo "${MYSQL_ROOT_PASSWORD:-${DB_ROOT_PASSWORD:-}}"')
             if [ -z "$CONTAINERENV_DBPW" ]; then
@@ -153,7 +164,7 @@ for cont in $CONTAINERS; do
                 continue
             fi
             docker exec "${cont}" sh -c 'exec mariadb-dump -u root -p"$0" --all-databases' \
-                "${CONTAINERENV_DBPW}" | gzip -9 > "${TEMPDIR}/${OUTPUT}"
+                "${CONTAINERENV_DBPW}" | "${DUMP_COMPRESS[@]}" > "${TEMPDIR}/${OUTPUT}"
             commit_backup "$OUTPUT"
 
         # ---------------------------------------------------------------
@@ -161,7 +172,7 @@ for cont in $CONTAINERS; do
             # BACKUP MySQL – dump once per container
             if [ "${DB_DONE[$cont]+set}" ]; then continue; fi
             DB_DONE[$cont]=1
-            OUTPUT="${TIMESTAMP}_${PROJECTNAME}.${CONTAINERNAME}.mysqldump.sql.gz"
+            OUTPUT="${TIMESTAMP}_${PROJECTNAME}.${CONTAINERNAME}.mysqldump.${DUMP_EXT}"
             print_status "  🐬 MySQL: ${OUTPUT}... "
             CONTAINERENV_DBPW=$(docker exec "${cont}" sh -c 'echo "${MYSQL_ROOT_PASSWORD:-${DB_ROOT_PASSWORD:-}}"')
             if [ -z "$CONTAINERENV_DBPW" ]; then
@@ -169,7 +180,7 @@ for cont in $CONTAINERS; do
                 continue
             fi
             docker exec "${cont}" sh -c 'exec mysqldump -u root -p"$0" --all-databases' \
-                "${CONTAINERENV_DBPW}" | gzip -9 > "${TEMPDIR}/${OUTPUT}"
+                "${CONTAINERENV_DBPW}" | "${DUMP_COMPRESS[@]}" > "${TEMPDIR}/${OUTPUT}"
             commit_backup "$OUTPUT"
 
         # ---------------------------------------------------------------
@@ -177,7 +188,7 @@ for cont in $CONTAINERS; do
             # BACKUP PostgreSQL – dump once per container
             if [ "${DB_DONE[$cont]+set}" ]; then continue; fi
             DB_DONE[$cont]=1
-            OUTPUT="${TIMESTAMP}_${PROJECTNAME}.${CONTAINERNAME}.postgredump.sql.gz"
+            OUTPUT="${TIMESTAMP}_${PROJECTNAME}.${CONTAINERNAME}.postgredump.${DUMP_EXT}"
             print_status "  🐘 PostgreSQL: ${OUTPUT}... "
             CONTAINERENV_DBUSER=$(docker exec "${cont}" sh -c 'echo "$POSTGRES_USER"')
             if [ -z "$CONTAINERENV_DBUSER" ]; then
@@ -185,7 +196,7 @@ for cont in $CONTAINERS; do
                 continue
             fi
             docker exec "${cont}" sh -c 'exec pg_dumpall -U "$0"' \
-                "${CONTAINERENV_DBUSER}" | gzip -9 > "${TEMPDIR}/${OUTPUT}"
+                "${CONTAINERENV_DBUSER}" | "${DUMP_COMPRESS[@]}" > "${TEMPDIR}/${OUTPUT}"
             commit_backup "$OUTPUT"
 
         # ---------------------------------------------------------------
