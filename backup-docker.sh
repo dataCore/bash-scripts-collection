@@ -124,6 +124,13 @@ for cont in $CONTAINERS; do
     IMAGE_NAME="${IMAGE##*/}"
     IMAGE_NAME="${IMAGE_NAME%%[:@]*}"
     CONTAINERNAME=$(docker inspect --format '{{.Name}}' "$cont" 2>/dev/null | sed 's|^/||')
+    # Opt-out per container: label datacore.backup.ignore=true skips all of its
+    # volumes (e.g. a search index that can be rebuilt from the primary data).
+    BACKUP_IGNORE=$(docker inspect --format '{{ index .Config.Labels "datacore.backup.ignore" }}' "$cont" 2>/dev/null || true)
+    if [ "${BACKUP_IGNORE,,}" == "true" ]; then
+        echo "  ⏭️  ${CONTAINERNAME}: skipped (label datacore.backup.ignore=true)"
+        continue
+    fi
     # Only named Docker volumes (anonymous and bind mounts are excluded)
     VOLUMES=$(docker inspect \
         --format '{{ range .Mounts }}{{ if eq .Type "volume" }}{{ .Name }}{{ "\n" }}{{ end }}{{ end }}' \
