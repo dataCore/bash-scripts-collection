@@ -10,6 +10,7 @@
 # 2025-08-21 Optimierungen und >1
 # 2026-05-07 Bugfixes & Optimierungen (root-check, TEMPDIR race, DB-done flag,
 #            volume dedup, bind-mount skip, trap ERR entfernt)
+# 2026-10-01 Cleanup also deletes *.zst dumps
 #
 # Usage:   backup-docker {DOCKERCOMPOSE-PROJECTNAME} {BACKUPDIR} {BACKUPDURATIONDAYS}
 # Example: backup-docker 'datacorecloud' '/mnt/backup' 2 > /var/log/dataCoreBackupScript.log
@@ -254,7 +255,8 @@ done
 # =======================================================================
 # CLEANUP OLD BACKUPS
 echo "  🗑️  Cleanup old backups (older than ${BACKUPDURATIONDAYS} days)..."
-find "$PROJECTBACKUPDIR" -name "*_${PROJECTNAME}*" \( -name "*.gz" -o -name "*.tar" \) \
+# *.zst: SQL dumps since 2026-09-29 – before this was added they were never deleted
+find "$PROJECTBACKUPDIR" -name "*_${PROJECTNAME}*" \( -name "*.gz" -o -name "*.zst" -o -name "*.tar" \) \
     -daystart -mtime +"$BACKUPDURATIONDAYS" \
     -exec echo "    - Delete: {}" \; -exec rm -f {} \;
 

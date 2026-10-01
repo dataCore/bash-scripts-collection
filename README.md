@@ -36,7 +36,7 @@ bash /usr/bin/datacore/bash/link.sh
 |---|---|---|
 | `backup-docker.sh` | `{PROJECT} {BACKUPDIR:/mnt/backup/} {DAYS:2}` | Backs up one Docker Compose project: compose configuration, volumes and databases (MariaDB, MySQL, PostgreSQL, MongoDB, GitLab). SQL dumps are compressed with `zstd` (all cores, `.sql.zst`) when it is installed, otherwise with `gzip` (`.sql.gz`). A container labelled `datacore.backup.ignore=true` is skipped with all its volumes. |
 | `backup-docker-all.sh` | `{BACKUPDIR:/mnt/backup/} {DAYS:2} {PBS_REPO}` | Backs up all running Compose projects, optionally uploading to a Proxmox Backup Server. |
-| `restore-docker.sh` | `{BACKUPDIR:/mnt/backup/}` | Interactive restore of a Compose project. Run from the project directory. |
+| `restore-docker.sh` | `{BACKUPDIR:/mnt/backup/}` | Interactive restore of a Compose project. Run from the project directory. Restores every type `backup-docker.sh` writes. A PostgreSQL dump is only restored into an empty database (fresh volume), a volume only while no running container uses it. |
 | `backup-remoteserver.sh` | `<remote-ip> <remote-path>` | Backs up a remote path to a Proxmox Backup Server through an SSH reverse tunnel. Credentials in `/etc/backup-remoteserver.conf`. |
 
 ### Updates

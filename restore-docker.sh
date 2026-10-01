@@ -8,6 +8,9 @@
 # 2026-05-07 Bugfixes & Optimierungen (docker inspect fix, healthcheck fallback,
 #            ELAPSED reset per DB, MongoDB $CONTAINER typo, GitLab path fix,
 #            root check moved up, trap cleanup added)
+# 2026-10-01 Names from the filename (volumes with dots), lower-cased project,
+#            refuse Postgres restore into non-empty DB, newest GitLab backup,
+#            refuse volume restore while in use, ERR trap with real line
 #
 # INFO: Run from the docker-compose project directory, e.g.:
 #       cd /etc/docker-compose/datacoreipam/
@@ -26,17 +29,12 @@ export LANG="en_US.UTF-8"
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 # --- STRICT MODE ---
-set -euo pipefail
+# -E lets the ERR trap fire inside functions too. ERR (not EXIT) is used so
+# $LINENO is the failing line; explicit `exit 1` after an own message stays quiet.
+set -Eeuo pipefail
+trap 'echo -e "\n❌ Error on line $LINENO. Restore script aborted."' ERR
 
 # --- FUNCTIONS ---
-
-cleanup() {
-    local exit_code=$?
-    if [ "$exit_code" -ne 0 ]; then
-        echo -e "\n❌ Error on line $LINENO. Restore script aborted."
-    fi
-}
-trap cleanup EXIT
 
 # Write a SQL dump to stdout, decompressed by its extension (.sql.zst or .sql.gz).
 decompress() {
@@ -48,6 +46,24 @@ decompress() {
             fi
             zstd -dcq "$1" ;;
         *)  gunzip -c "$1" ;;
+    esac
+}
+
+# Map a backup filename to "<type> <suffix>"; prints nothing for unknown files.
+# Must cover every OUTPUT name that backup-docker writes.
+backup_type() {
+    case "$1" in
+        *.compose.tar.gz)        echo "compose .compose.tar.gz" ;;
+        *.mariadbdump.sql.zst)   echo "mariadb .mariadbdump.sql.zst" ;;
+        *.mariadbdump.sql.gz)    echo "mariadb .mariadbdump.sql.gz" ;;
+        *.mysqldump.sql.zst)     echo "mysql .mysqldump.sql.zst" ;;
+        *.mysqldump.sql.gz)      echo "mysql .mysqldump.sql.gz" ;;
+        *.postgredump.sql.zst)   echo "postgres .postgredump.sql.zst" ;;
+        *.postgredump.sql.gz)    echo "postgres .postgredump.sql.gz" ;;
+        *.mongodump.archive.gz)  echo "mongo .mongodump.archive.gz" ;;
+        *.mongodump.sql.gz)      echo "mongo .mongodump.sql.gz" ;;   # pre-2026-09 name
+        *.gitlabbackup.tar.gz)   echo "gitlab .gitlabbackup.tar.gz" ;;
+        *.volume.tar.gz)         echo "volume .volume.tar.gz" ;;
     esac
 }
 
@@ -165,7 +181,9 @@ wait_healthy() {
 
 # --- VARIABLES ---
 HOSTNAME="$(hostname)"
-PROJECTNAME=$(basename "$PWD")
+# Lower-cased like backup-docker does, otherwise a project dir such as
+# 'godlessDescentWeb' never matches its files '..._godlessdescentweb.*'.
+PROJECTNAME=$(basename "$PWD" | tr '[:upper:]' '[:lower:]')
 BACKUPDIR="${1:-"/mnt/backup"}/${HOSTNAME}/${PROJECTNAME}"
 DOCKERROOTDIR=$(docker info --format '{{ .DockerRootDir }}')
 TIMEOUT=60        # Max wait time in seconds
@@ -190,19 +208,22 @@ declare -a COMPOSES MARIADBS MYSQLS POSTGRES MONGOS GITLABS VOLUMES
 declare -A OPTIONS
 i=1
 
+shopt -s nocaseglob
 for file in "$BACKUPDIR"/*"$PROJECTNAME"*; do
     [ -f "$file" ] || continue   # skip if glob matched nothing
     filename=$(basename "$file")
-    case "$filename" in
-        *.compose.tar.gz)       COMPOSES+=("$filename") ;;
-        *.mariadbdump.sql.gz | *.mariadbdump.sql.zst) MARIADBS+=("$filename") ;;
-        *.mysqldump.sql.gz | *.mysqldump.sql.zst)     MYSQLS+=("$filename") ;;
-        *.postgredump.sql.gz | *.postgredump.sql.zst) POSTGRES+=("$filename") ;;
-        *.mongodump.archive.gz | *.mongodump.sql.gz) MONGOS+=("$filename") ;;
-        *.gitlabbackup.tar.gz)  GITLABS+=("$filename") ;;
-        *.volume.tar.gz)        VOLUMES+=("$filename") ;;
+    read -r type _ <<< "$(backup_type "$filename")"
+    case "${type:-}" in
+        compose)  COMPOSES+=("$filename") ;;
+        mariadb)  MARIADBS+=("$filename") ;;
+        mysql)    MYSQLS+=("$filename") ;;
+        postgres) POSTGRES+=("$filename") ;;
+        mongo)    MONGOS+=("$filename") ;;
+        gitlab)   GITLABS+=("$filename") ;;
+        volume)   VOLUMES+=("$filename") ;;
     esac
 done
+shopt -u nocaseglob
 
 # Print a group of backup files with a sequential index
 print_group() {
@@ -247,18 +268,27 @@ fi
 echo ""
 echo "🔄 Restoring: $(basename "$SELECTED")"
 
-# Extract the container name from the backup filename:
-# Pattern: {date}_{time}_{project}.{containername}.{backuptype}.ext
-# compose.tar.gz has no containername segment → CONTAINERNAME will be empty, that is fine.
-CONTAINERNAME=$(basename "$SELECTED" | sed -n 's/^[0-9]*_[0-9]*_[^.]*\.\([^.]*\)\..*/\1/p')
+# Split the backup filename: {date}_{time}_{project}.{name}{suffix}
+# {name} is the container (dumps, GitLab) or the volume (volume.tar.gz) and may
+# itself contain dots (volume 'web.cache'), so cut the known prefix and suffix
+# instead of splitting on dots. compose.tar.gz has no {name}, that is fine.
+read -r TYPE SUFFIX <<< "$(backup_type "$(basename "$SELECTED")")"
+OBJNAME=$(basename "$SELECTED" "$SUFFIX")
+OBJNAME="${OBJNAME#*_*_}"     # drop {date}_{time}_
+if [[ "$OBJNAME" == *.* ]]; then
+    OBJNAME="${OBJNAME#*.}"   # drop {project}. (compose project names have no dots)
+else
+    OBJNAME=""
+fi
+CONTAINERNAME="$OBJNAME"
 
 # Resolve the compose SERVICE name from the container name.
-# Not needed for compose.tar.gz restores – skip resolution in that case.
+# Not needed for compose and volume restores – skip resolution in those cases.
 # Strategy 1: container already exists (stopped) → read label directly
 # Strategy 2: parse docker compose config → match container_name to service
 # Strategy 3: fall back to using container name as-is (simple projects)
 SERVICENAME=""
-if [[ "$SELECTED" != *.compose.tar.gz ]]; then
+if [[ "$TYPE" != compose && "$TYPE" != volume ]]; then
     if [ -n "$CONTAINERNAME" ]; then
         SERVICENAME=$(docker ps -a \
             --filter "name=^/${CONTAINERNAME}$" \
@@ -287,14 +317,14 @@ fi
 
 # =======================================================================
 # RESTORE DOCKER COMPOSE CONFIG
-if [[ "$SELECTED" == *.compose.tar.gz ]]; then
+if [ "$TYPE" == compose ]; then
     echo "📦 Restoring Docker Compose config..."
     tar -xzf "$SELECTED" -C "$PWD"
     echo "✅ Compose config restored to $PWD"
 
 # =======================================================================
 # RESTORE MariaDB
-elif [[ "$SELECTED" == *.mariadbdump.sql.gz || "$SELECTED" == *.mariadbdump.sql.zst ]]; then
+elif [ "$TYPE" == mariadb ]; then
     echo "🐬 Restoring MariaDB..."
     compose_up "$SERVICENAME"
     wait_healthy "$SERVICENAME" mariadb
@@ -313,7 +343,7 @@ elif [[ "$SELECTED" == *.mariadbdump.sql.gz || "$SELECTED" == *.mariadbdump.sql.
 
 # =======================================================================
 # RESTORE MySQL
-elif [[ "$SELECTED" == *.mysqldump.sql.gz || "$SELECTED" == *.mysqldump.sql.zst ]]; then
+elif [ "$TYPE" == mysql ]; then
     echo "🐬 Restoring MySQL..."
     compose_up "$SERVICENAME"
     wait_healthy "$SERVICENAME" mysql
@@ -330,24 +360,40 @@ elif [[ "$SELECTED" == *.mysqldump.sql.gz || "$SELECTED" == *.mysqldump.sql.zst 
 
 # =======================================================================
 # RESTORE PostgreSQL
-elif [[ "$SELECTED" == *.postgredump.sql.gz || "$SELECTED" == *.postgredump.sql.zst ]]; then
+elif [ "$TYPE" == postgres ]; then
     echo "🐘 Restoring PostgreSQL..."
     compose_up "$SERVICENAME"
     wait_healthy "$SERVICENAME" postgres
-    CONTAINERENV_DBNAME=$(docker compose exec "$SERVICENAME" sh -c 'echo "${POSTGRES_DB:-}"')
-    CONTAINERENV_DBUSER=$(docker compose exec "$SERVICENAME" sh -c 'echo "${POSTGRES_USER:-}"')
+    CONTAINERENV_DBNAME=$(docker compose exec -T "$SERVICENAME" sh -c 'echo "${POSTGRES_DB:-}"' | tr -d '\r\n')
+    CONTAINERENV_DBUSER=$(docker compose exec -T "$SERVICENAME" sh -c 'echo "${POSTGRES_USER:-}"' | tr -d '\r\n')
     if [ -z "$CONTAINERENV_DBUSER" ]; then
         echo "❌ POSTGRES_USER is not set in container '${CONTAINERNAME}'."
         exit 1
     fi
-    echo "  Database: '${CONTAINERENV_DBNAME:-postgres}', User: '${CONTAINERENV_DBUSER}'"
+    DBNAME="${CONTAINERENV_DBNAME:-postgres}"
+    echo "  Database: '${DBNAME}', User: '${CONTAINERENV_DBUSER}'"
+    # A pg_dumpall dump only restores cleanly into a freshly initialised
+    # instance. Into existing tables psql reports errors, keeps going and leaves
+    # old rows in place (or duplicates them) – so refuse instead of mixing data.
+    USERTABLES=$(docker compose exec -T "$SERVICENAME" \
+        psql -U "$CONTAINERENV_DBUSER" -d "$DBNAME" -tAc \
+        "SELECT count(*) FROM information_schema.tables WHERE table_schema NOT IN ('pg_catalog','information_schema')" \
+        | tr -d '\r\n')
+    if [ "${USERTABLES:-0}" != "0" ]; then
+        echo "❌ Database '${DBNAME}' already contains ${USERTABLES} table(s)."
+        echo "   Restore into an empty instance: stop the stack, remove the database"
+        echo "   volume (docker compose down; docker volume rm <volume>) and run again."
+        exit 1
+    fi
+    # Expected on a fresh instance: 'role ... already exists' and
+    # 'database ... already exists' for the user/DB the image created at init.
     decompress "$SELECTED" | docker compose exec -T "$SERVICENAME" \
-        psql -U "$CONTAINERENV_DBUSER" -d "${CONTAINERENV_DBNAME:-postgres}"
-    echo "✅ PostgreSQL restored"
+        psql -q -U "$CONTAINERENV_DBUSER" -d "$DBNAME" >/dev/null
+    echo "✅ PostgreSQL restored (errors 'role/database ... already exists' above are expected)"
 
 # =======================================================================
 # RESTORE MongoDB
-elif [[ "$SELECTED" == *.mongodump.archive.gz || "$SELECTED" == *.mongodump.sql.gz ]]; then
+elif [ "$TYPE" == mongo ]; then
     echo "🍃 Restoring MongoDB..."
     compose_up "$SERVICENAME"
     wait_healthy "$SERVICENAME" mongo
@@ -359,7 +405,7 @@ elif [[ "$SELECTED" == *.mongodump.archive.gz || "$SELECTED" == *.mongodump.sql.
 
 # =======================================================================
 # RESTORE GitLab
-elif [[ "$SELECTED" == *.gitlabbackup.tar.gz ]]; then
+elif [ "$TYPE" == gitlab ]; then
     echo "🦊 Restoring GitLab..."
     compose_up "$SERVICENAME"
 
@@ -378,7 +424,9 @@ elif [[ "$SELECTED" == *.gitlabbackup.tar.gz ]]; then
 
     # Determine the backup timestamp token from the archive filename
     # GitLab restore expects the token part (everything before _gitlab_backup.tar)
-    BACKUP_TOKEN=$(find "${GITLAB_BACKUP_HOST}" -maxdepth 1 -name '*_gitlab_backup.tar' -printf '%f\n' 2>/dev/null | sort | head -n 1)
+    # backup-docker tars the whole backup dir, so it can hold several backups.
+    # Tokens start with the epoch: the last one in sort order is the newest.
+    BACKUP_TOKEN=$(find "${GITLAB_BACKUP_HOST}" -maxdepth 1 -name '*_gitlab_backup.tar' -printf '%f\n' 2>/dev/null | sort | tail -n 1)
     BACKUP_TOKEN=${BACKUP_TOKEN%_gitlab_backup.tar}
     if [ -z "$BACKUP_TOKEN" ]; then
         echo "❌ Could not find a gitlab_backup.tar file in ${GITLAB_BACKUP_HOST}"
@@ -395,9 +443,21 @@ elif [[ "$SELECTED" == *.gitlabbackup.tar.gz ]]; then
 
 # =======================================================================
 # RESTORE Volume
-elif [[ "$SELECTED" == *.volume.tar.gz ]]; then
-    echo "💾 Restoring Volume..."
-    TARGETDIR="${DOCKERROOTDIR}/volumes/${CONTAINERNAME}"
+elif [ "$TYPE" == volume ]; then
+    echo "💾 Restoring Volume '${OBJNAME}'..."
+    if [[ "$OBJNAME" =~ ^[0-9a-f]{64}$ ]]; then
+        echo "⚠️  '${OBJNAME}' is an anonymous volume: a recreated container gets a new"
+        echo "   one and will not see this data. Copy it over by hand if it is needed."
+    fi
+    # The archive holds the volume dir incl. _data/; extracting while a container
+    # writes to it would mix old and new files.
+    INUSE=$(docker ps -q --filter "volume=${OBJNAME}")
+    if [ -n "$INUSE" ]; then
+        echo "❌ Volume '${OBJNAME}' is used by running container(s): $(docker ps --filter "volume=${OBJNAME}" --format '{{.Names}}' | paste -sd ' ')"
+        echo "   Stop them first (docker compose stop <service>)."
+        exit 1
+    fi
+    TARGETDIR="${DOCKERROOTDIR}/volumes/${OBJNAME}"
     if [ -d "$TARGETDIR" ]; then
         read -r -p "⚠️  Folder '$TARGETDIR' already exists. Delete it first? (y/n): " CONFIRM
         if [[ "$CONFIRM" == "y" || "$CONFIRM" == "Y" ]]; then
