@@ -11,6 +11,9 @@
 # 2026-10-01 Names from the filename (volumes with dots), lower-cased project,
 #            refuse Postgres restore into non-empty DB, newest GitLab backup,
 #            refuse volume restore while in use, ERR trap with real line
+# 2026-10-02 Postgres: empty check over all databases and fail-closed,
+#            restore fails on any error besides 'role/database already exists'.
+#            MariaDB/MySQL/MongoDB: no success message on import errors
 #
 # INFO: Run from the docker-compose project directory, e.g.:
 #       cd /etc/docker-compose/datacoreipam/
@@ -47,6 +50,31 @@ decompress() {
             zstd -dcq "$1" ;;
         *)  gunzip -c "$1" ;;
     esac
+}
+
+# Judge a dump import by its exit code and stderr: DB clients may keep going
+# after errors and still exit 0 (psql) or only log failed documents
+# (mongorestore). Aborts with a summary unless the exit code is 0 and no stderr
+# line matches error_re (lines matching the optional expected_re are ignored).
+# Usage: check_import <label> <exit_code> <stderr> <error_re> [expected_re]
+check_import() {
+    local label="$1" rc="$2" stderr="$3" error_re="$4" expected_re="${5:-}"
+    local errors count
+    errors=$(grep -E "$error_re" <<< "$stderr" || true)
+    if [ -n "$expected_re" ]; then
+        errors=$(grep -vE "$expected_re" <<< "$errors" || true)
+    fi
+    count=$(grep -c . <<< "$errors" || true)
+    if [ "$count" -ne 0 ] || [ "$rc" -ne 0 ]; then
+        echo "❌ ${label} restore failed: ${count} error(s), exit code ${rc}."
+        if [ "$count" -ne 0 ]; then
+            echo "   First errors:"
+            head -n 10 <<< "$errors" | sed 's/^/   /'
+        else
+            tail -n 10 <<< "$stderr" | sed 's/^/   /'
+        fi
+        exit 1
+    fi
 }
 
 # Map a backup filename to "<type> <suffix>"; prints nothing for unknown files.
@@ -337,8 +365,10 @@ elif [ "$TYPE" == mariadb ]; then
         echo "   Check the env_file / environment: section in your docker-compose.yml."
         exit 1
     fi
-    decompress "$SELECTED" | docker compose exec -T "$SERVICENAME" \
-        sh -c 'mariadb -u root -p"${MYSQL_ROOT_PASSWORD:-$DB_ROOT_PASSWORD}"'
+    IMPORT_RC=0
+    IMPORT_STDERR=$( { decompress "$SELECTED" | docker compose exec -T "$SERVICENAME" \
+        sh -c 'mariadb -u root -p"${MYSQL_ROOT_PASSWORD:-$DB_ROOT_PASSWORD}"'; } 2>&1 ) || IMPORT_RC=$?
+    check_import "MariaDB" "$IMPORT_RC" "$IMPORT_STDERR" '^ERROR'
     echo "✅ MariaDB restored"
 
 # =======================================================================
@@ -354,8 +384,10 @@ elif [ "$TYPE" == mysql ]; then
         echo "   Check the env_file / environment: section in your docker-compose.yml."
         exit 1
     fi
-    decompress "$SELECTED" | docker compose exec -T "$SERVICENAME" \
-        sh -c 'mysql -u root -p"${MYSQL_ROOT_PASSWORD:-$DB_ROOT_PASSWORD}"'
+    IMPORT_RC=0
+    IMPORT_STDERR=$( { decompress "$SELECTED" | docker compose exec -T "$SERVICENAME" \
+        sh -c 'mysql -u root -p"${MYSQL_ROOT_PASSWORD:-$DB_ROOT_PASSWORD}"'; } 2>&1 ) || IMPORT_RC=$?
+    check_import "MySQL" "$IMPORT_RC" "$IMPORT_STDERR" '^ERROR'
     echo "✅ MySQL restored"
 
 # =======================================================================
@@ -375,21 +407,55 @@ elif [ "$TYPE" == postgres ]; then
     # A pg_dumpall dump only restores cleanly into a freshly initialised
     # instance. Into existing tables psql reports errors, keeps going and leaves
     # old rows in place (or duplicates them) – so refuse instead of mixing data.
-    USERTABLES=$(docker compose exec -T "$SERVICENAME" \
+    # The dump switches databases itself (\connect), and apps often use a DB
+    # other than POSTGRES_DB, so every database is checked. Fail closed: if a
+    # check does not return a number, the instance is treated as not empty.
+    if ! PG_DATABASES=$(docker compose exec -T "$SERVICENAME" \
         psql -U "$CONTAINERENV_DBUSER" -d "$DBNAME" -tAc \
-        "SELECT count(*) FROM information_schema.tables WHERE table_schema NOT IN ('pg_catalog','information_schema')" \
-        | tr -d '\r\n')
-    if [ "${USERTABLES:-0}" != "0" ]; then
-        echo "❌ Database '${DBNAME}' already contains ${USERTABLES} table(s)."
+        "SELECT datname FROM pg_database WHERE NOT datistemplate" \
+        | tr -d '\r'); then
+        echo "❌ Could not list the databases in container '${SERVICENAME}'. Restore aborted."
+        exit 1
+    fi
+    mapfile -t PG_DBLIST < <(printf '%s\n' "$PG_DATABASES" | sed '/^$/d')
+    if [ "${#PG_DBLIST[@]}" -eq 0 ]; then
+        echo "❌ The database list in container '${SERVICENAME}' came back empty. Restore aborted."
+        exit 1
+    fi
+    USERTABLES=0
+    PG_TABLECOUNTS=()
+    for db in "${PG_DBLIST[@]}"; do
+        if ! COUNT=$(docker compose exec -T "$SERVICENAME" \
+            psql -U "$CONTAINERENV_DBUSER" -d "$db" -tAc \
+            "SELECT count(*) FROM pg_catalog.pg_tables WHERE schemaname NOT IN ('pg_catalog','information_schema')" \
+            | tr -d '\r\n'); then
+            COUNT=""
+        fi
+        if ! [[ "$COUNT" =~ ^[0-9]+$ ]]; then
+            echo "❌ Could not count the tables in database '${db}' (got: '${COUNT}'). Restore aborted."
+            exit 1
+        fi
+        PG_TABLECOUNTS+=("${db}: ${COUNT} table(s)")
+        USERTABLES=$(( USERTABLES + COUNT ))
+    done
+    if [ "$USERTABLES" -ne 0 ]; then
+        echo "❌ The instance already contains ${USERTABLES} table(s):"
+        printf '   - %s\n' "${PG_TABLECOUNTS[@]}"
         echo "   Restore into an empty instance: stop the stack, remove the database"
         echo "   volume (docker compose down; docker volume rm <volume>) and run again."
         exit 1
     fi
+    # psql keeps going after SQL errors and still exits 0, so its stderr decides.
     # Expected on a fresh instance: 'role ... already exists' and
     # 'database ... already exists' for the user/DB the image created at init.
-    decompress "$SELECTED" | docker compose exec -T "$SERVICENAME" \
-        psql -q -U "$CONTAINERENV_DBUSER" -d "$DBNAME" >/dev/null
-    echo "✅ PostgreSQL restored (errors 'role/database ... already exists' above are expected)"
+    IMPORT_RC=0
+    IMPORT_STDERR=$( { decompress "$SELECTED" | docker compose exec -T "$SERVICENAME" \
+        psql -q -U "$CONTAINERENV_DBUSER" -d "$DBNAME" >/dev/null; } 2>&1 ) || IMPORT_RC=$?
+    PG_EXPECTED_RE='ERROR:  (role|database) ".*" already exists$'
+    check_import "PostgreSQL" "$IMPORT_RC" "$IMPORT_STDERR" 'ERROR:|FATAL:' "$PG_EXPECTED_RE"
+    PG_EXPECTED=$(grep -cE "$PG_EXPECTED_RE" <<< "$IMPORT_STDERR" || true)
+    echo "ℹ️  ${PG_EXPECTED} expected error(s) ignored ('role/database ... already exists')."
+    echo "✅ PostgreSQL restored"
 
 # =======================================================================
 # RESTORE MongoDB
@@ -399,8 +465,14 @@ elif [ "$TYPE" == mongo ]; then
     wait_healthy "$SERVICENAME" mongo
     # `mongodump --archive --gzip` gzips the whole archive stream: unpack it here
     # and hand mongorestore a plain archive (--gzip on top fails: invalid header).
-    gunzip -c "$SELECTED" | docker compose exec -T "$SERVICENAME" \
-        sh -c 'mongorestore --archive --drop'
+    # mongorestore exits 0 even when single documents fail (e.g. duplicate key);
+    # it only logs them, so its log decides.
+    IMPORT_RC=0
+    IMPORT_STDERR=$( { gunzip -c "$SELECTED" | docker compose exec -T "$SERVICENAME" \
+        sh -c 'mongorestore --archive --drop'; } 2>&1 ) || IMPORT_RC=$?
+    check_import "MongoDB" "$IMPORT_RC" "$IMPORT_STDERR" \
+        'Failed:|continuing through error|[1-9][0-9]* document\(s\) failed to restore'
+    grep -E 'document\(s\) restored successfully' <<< "$IMPORT_STDERR" | sed 's/^.*\t//; s/^/  /' || true
     echo "✅ MongoDB restored"
 
 # =======================================================================
