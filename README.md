@@ -89,7 +89,11 @@ PBS_PASSWORD="..."
 PBS_FINGERPRINT="..."
 
 # m   h   dom mon dow   command
-  03  03   *   *   *    backup-docker-all '/mnt/backup' 0 > /var/log/dataCoreBackupScript.log
+  03  03   *   *   *    mountpoint -q /mnt/backup && backup-docker-all '/mnt/backup' 0 > /var/log/dataCoreBackupScript.log 2>&1
   03  05   *   *   03   update-system -y > /var/log/dataCoreUpdateScript.log
   43  05   *   *   03   update-docker-all > /var/log/dataCoreUpdateDockerScript.log
 ```
+
+`backup-docker-all` does not check whether `/mnt/backup` is mounted. Without
+`mountpoint -q` a missing CIFS mount makes it write the backup to the local disk
+unnoticed; `2>&1` sends error messages to the log as well.
