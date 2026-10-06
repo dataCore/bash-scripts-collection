@@ -78,6 +78,35 @@ if git -C "$WORKINGDIR" rev-parse --is-inside-work-tree &>/dev/null; then
 fi
 
 # =======================================================================
+# Check env files for exposed secrets
+# =======================================================================
+# Git only tracks the executable bit: a tracked env file is rewritten with
+# umask permissions on every pull that changes it, so 'tracked' is reported
+# as well. Templates (.env.example etc.) hold no secrets and are skipped.
+shopt -s nullglob
+for ENVFILE in "$WORKINGDIR"/.env "$WORKINGDIR"/.env.* "$WORKINGDIR"/*.env; do
+    [ -f "$ENVFILE" ] || continue
+    case "$ENVFILE" in
+        *.example|*.sample|*.template|*.dist) continue ;;
+    esac
+    ENVNAME="${ENVFILE##*/}"
+
+    if git -C "$WORKINGDIR" ls-files --error-unmatch -- "$ENVNAME" &>/dev/null; then
+        echo "⚠️  WARNING: '${ENVFILE}' is tracked by Git — its secrets are in the repository!"
+        echo "   Untrack it and ignore it from now on:"
+        echo "     git -C $(printf '%q' "$WORKINGDIR") rm --cached -- $(printf '%q' "$ENVNAME") && echo $(printf '%q' "/$ENVNAME") >> $(printf '%q' "$WORKINGDIR/.gitignore")"
+    fi
+
+    ENVMODE=$(stat -L -c '%a' "$ENVFILE")
+    if (( 8#$ENVMODE & 8#077 )); then
+        echo "⚠️  WARNING: '${ENVFILE}' is readable by group/others (mode ${ENVMODE})!"
+        echo "   Restrict it to the owner:"
+        echo "     chmod go-rwx $(printf '%q' "$ENVFILE")"
+    fi
+done
+shopt -u nullglob
+
+# =======================================================================
 echo -n "🔍 Checking for newer Docker images for '${PROJECTNAME}'..."
 
 # Get all images used in the current docker-compose.yml
