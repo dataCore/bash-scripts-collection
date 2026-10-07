@@ -24,7 +24,7 @@ bash /usr/bin/datacore/bash/link.sh
 
 | Script | Parameters | Description |
 |---|---|---|
-| `install-ssh.sh` | `<username> [--bantime <duration>]` | SSH hardening: openssh-server, figlet banner, fail2ban, sudo, `ssh-users` group, authorized_keys. Public keys are read from `pubkeys/<username>.pub`. |
+| `install-ssh.sh` | `<username> [--bantime <duration>]` | SSH hardening: openssh-server, pre-auth warning banner, figlet hostname + OS/IP as MOTD (`/etc/update-motd.d/20-datacore`), fail2ban, sudo, `ssh-users` group, authorized_keys. Public keys are read from `pubkeys/<username>.pub`. |
 | `install-docker.sh` | | Installs Docker CE. Derives the Docker subnet from the last octet of the host IP, configures IPv4/IPv6 address pools, log limits and NFS support. |
 | `install-mon.sh` | `<monitoring-server>` | Installs Zabbix Agent2 with PSK encryption, generates the PSK and prints the matching host configuration for the Zabbix frontend. |
 | `install-log.sh` | `--host <fqdn> [--docker] [--proxmox] [--unifi] [--bmc] [--user <email>] [--pass <secret>] [--vlan <id>] [--org <name>]` | Installs Fluent Bit and ships logs to OpenObserve. Source configs live in `logconfs/` (`linux` always, the rest on demand). IP and VLAN are auto-detected. Configuration is written to `/etc/fluent-bit/datacore.conf` and `datacore.env` and wired in through a systemd drop-in, so the packaged `fluent-bit.conf` stays untouched and `apt upgrade` never triggers a conffile prompt. |
