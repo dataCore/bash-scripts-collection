@@ -13,6 +13,7 @@ scripts=(
     "install-mon.sh:install-mon"
     "install-ssh.sh:install-ssh"
     "install-swap.sh:install-swap"
+    "komodo-migrate-env.sh:komodo-migrate-env"
     "restore-docker.sh:restore-docker"
     "show-lastreboot.sh:show-lastreboot"
     "update-docker.sh:update-docker"
