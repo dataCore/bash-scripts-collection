@@ -11,6 +11,7 @@
 # 2026-05-07 Bugfixes & Optimierungen (root-check, TEMPDIR race, DB-done flag,
 #            volume dedup, bind-mount skip, trap ERR entfernt)
 # 2026-10-01 Cleanup also deletes *.zst dumps
+# 2026-10-08 MongoDB dump authenticates with MONGO_INITDB_ROOT_* when set
 #
 # Usage:   backup-docker {DOCKERCOMPOSE-PROJECTNAME} {BACKUPDIR} {BACKUPDURATIONDAYS}
 # Example: backup-docker 'datacorecloud' '/mnt/backup' 2 > /var/log/dataCoreBackupScript.log
@@ -214,7 +215,13 @@ for cont in $CONTAINERS; do
                 DB_DONE[$cont]=1
                 OUTPUT="${TIMESTAMP}_${PROJECTNAME}.${CONTAINERNAME}.mongodump.archive.gz"
                 print_status "  🍃 MongoDB: ${OUTPUT}... "
-                docker exec "${cont}" sh -c 'mongodump --archive --gzip --quiet' \
+                # With MONGO_INITDB_ROOT_* set the server enforces auth (e.g. Komodo).
+                docker exec "${cont}" sh -c 'set --
+                    if [ -n "${MONGO_INITDB_ROOT_USERNAME:-}" ]; then
+                        set -- --authenticationDatabase admin \
+                            -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD"
+                    fi
+                    exec mongodump --archive --gzip --quiet "$@"' \
                     > "${TEMPDIR}/${OUTPUT}"
                 commit_backup "$OUTPUT"
             fi

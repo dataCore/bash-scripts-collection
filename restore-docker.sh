@@ -469,7 +469,12 @@ elif [ "$TYPE" == mongo ]; then
     # it only logs them, so its log decides.
     IMPORT_RC=0
     IMPORT_STDERR=$( { gunzip -c "$SELECTED" | docker compose exec -T "$SERVICENAME" \
-        sh -c 'mongorestore --archive --drop'; } 2>&1 ) || IMPORT_RC=$?
+        sh -c 'set --
+            if [ -n "${MONGO_INITDB_ROOT_USERNAME:-}" ]; then
+                set -- --authenticationDatabase admin \
+                    -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD"
+            fi
+            exec mongorestore --archive --drop "$@"'; } 2>&1 ) || IMPORT_RC=$?
     check_import "MongoDB" "$IMPORT_RC" "$IMPORT_STDERR" \
         'Failed:|continuing through error|[1-9][0-9]* document\(s\) failed to restore'
     grep -E 'document\(s\) restored successfully' <<< "$IMPORT_STDERR" | sed 's/^.*\t//; s/^/  /' || true
