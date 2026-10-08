@@ -8,6 +8,7 @@ scripts=(
     "backup-remoteserver.sh:backup-remoteserver"
     "check-cve.sh:check-cve"
     "install-docker.sh:install-docker"
+    "install-dockeradminagent.sh:install-dockeradminagent"
     "install-log.sh:install-log"
     "install-mon.sh:install-mon"
     "install-ssh.sh:install-ssh"

@@ -26,6 +26,7 @@ bash /usr/bin/datacore/bash/link.sh
 |---|---|---|
 | `install-ssh.sh` | `<username> [--bantime <duration>]` | SSH hardening: openssh-server, pre-auth warning banner, figlet hostname + OS/IP as MOTD (`/etc/update-motd.d/20-datacore`), fail2ban, sudo, `ssh-users` group, authorized_keys. Public keys are read from `pubkeys/<username>.pub`. |
 | `install-docker.sh` | | Installs Docker CE. Derives the Docker subnet from the last octet of the host IP, configures IPv4/IPv6 address pools, log limits and NFS support. |
+| `install-dockeradminagent.sh` | `--core-ip <ip>[,<ip>...] --core-public-key <key>` | Installs [Komodo](https://komo.do) Periphery as the systemd service `periphery`: pinned release, sha256-verified. The first run writes `/etc/komodo/periphery.config.toml` (root-only): inbound only on port 8120, only Komodo Core's address and public key accepted, no host shell through the web UI. Stack secrets go into its `[secrets]` section and never leave the host. Run again without arguments to update the binary; the config is never overwritten. |
 | `install-mon.sh` | `<monitoring-server>` | Installs Zabbix Agent2 with PSK encryption, generates the PSK and prints the matching host configuration for the Zabbix frontend. |
 | `install-log.sh` | `--host <fqdn> [--docker] [--proxmox] [--unifi] [--bmc] [--user <email>] [--pass <secret>] [--vlan <id>] [--org <name>]` | Installs Fluent Bit and ships logs to OpenObserve. Source configs live in `logconfs/` (`linux` always, the rest on demand). IP and VLAN are auto-detected. Configuration is written to `/etc/fluent-bit/datacore.conf` and `datacore.env` and wired in through a systemd drop-in, so the packaged `fluent-bit.conf` stays untouched and `apt upgrade` never triggers a conffile prompt. |
 | `install-swap.sh` | `[--size <n>] [--swappiness <n>] [--remove-old] [--fix-resume] [--dry-run]` | Sets up `/pagefile.sys` including fstab entry and persistent `vm.swappiness` (default 10). Size defaults to RAM, capped at 8G and floored at 2G. `--remove-old` disables previous swap partitions or files and cleans up fstab. Refuses to run inside LXC containers, where `pct set <ctid> -swap` is the correct tool. |
@@ -75,6 +76,7 @@ Order used for a fresh Debian 13 install:
 ```bash
 install-ssh datacore --bantime 30m     # SSH hardening, sudo, fail2ban, keys
 install-docker                          # only where containers run
+install-dockeradminagent --core-ip <core-ip> --core-public-key <key>   # Komodo agent, Docker hosts only
 install-mon dataCoreMonitor             # Zabbix agent; itpmonitor for ITP hosts
 install-swap                            # swap file, size derived from RAM
 install-log --host log.example.ch --docker
