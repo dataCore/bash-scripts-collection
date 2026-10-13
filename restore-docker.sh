@@ -507,10 +507,19 @@ elif [ "$TYPE" == postgres ]; then
                 exit 1
             fi
         elif [ "$INSTALLED" != "$ver" ]; then
-            echo "❌ Database '${db}': the image has TimescaleDB ${INSTALLED}, the dump was made with ${ver}."
-            echo "   Pin the image to ${ver} (e.g. timescale/timescaledb:${ver}-pg<major>), remove the"
-            echo "   database volume and run again. Update TimescaleDB after the restore."
-            exit 1
+            # The image's init created the extension in its own (newer) version.
+            # The images ship older versions too, and the database was checked to
+            # be empty, so set it up again in the dump's version (separate
+            # sessions: a backend cannot load two versions).
+            if [ -z "$(pg_query "$db" "SELECT 1 FROM pg_available_extension_versions WHERE name = 'timescaledb' AND version = '${ver}'")" ]; then
+                echo "❌ Database '${db}': the image has TimescaleDB ${INSTALLED}, the dump was made with ${ver},"
+                echo "   and the image does not ship ${ver}. Pin the image to ${ver}"
+                echo "   (e.g. timescale/timescaledb:${ver}-pg<major>), remove the database volume and run again."
+                exit 1
+            fi
+            echo "  TimescaleDB in '${db}': ${INSTALLED} → ${ver} (version of the dump)"
+            pg_query "$db" "DROP EXTENSION timescaledb" >/dev/null
+            pg_query "$db" "CREATE EXTENSION timescaledb VERSION '${ver}'" >/dev/null
         fi
     done <<< "$TSDB_INFO"
     # Only after every version matched, so an abort leaves no database in restoring mode.
