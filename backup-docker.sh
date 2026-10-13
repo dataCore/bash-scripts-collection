@@ -12,6 +12,8 @@
 #            volume dedup, bind-mount skip, trap ERR entfernt)
 # 2026-10-01 Cleanup also deletes *.zst dumps
 # 2026-10-08 MongoDB dump authenticates with MONGO_INITDB_ROOT_* when set
+# 2026-10-13 PostgreSQL: TimescaleDB version per database as a header in the
+#            dump (for restore-docker), expected catalog FK warnings suppressed
 #
 # Usage:   backup-docker {DOCKERCOMPOSE-PROJECTNAME} {BACKUPDIR} {BACKUPDURATIONDAYS}
 # Example: backup-docker 'datacorecloud' '/mnt/backup' 2 > /var/log/dataCoreBackupScript.log
@@ -61,6 +63,39 @@ print_duration() {
     local duration=$1
     printf "✅ (%02d:%02d:%02d)\n" \
         $((duration / 3600)) $(( (duration % 3600) / 60 )) $((duration % 60))
+}
+
+# Print "<database> <version>" for every database with the TimescaleDB extension.
+# Usage: timescaledb_versions <container> <user>
+timescaledb_versions() {
+    local cont="$1" user="$2" db ver
+    for db in $(docker exec "$cont" psql -U "$user" -d postgres -tAc \
+        "SELECT datname FROM pg_database WHERE datallowconn" | tr -d '\r'); do
+        ver=$(docker exec "$cont" psql -U "$user" -d "$db" -tAc \
+            "SELECT extversion FROM pg_extension WHERE extname = 'timescaledb'" | tr -d '\r')
+        [ -n "$ver" ] && echo "$db $ver"
+    done
+    return 0
+}
+
+# Print pg_dumpall's stderr. With TimescaleDB, pg_dump warns once per database
+# about circular foreign keys in the extension catalog (continuous_agg, …) plus
+# detail/hint lines. A full dump restores them fine, so with TimescaleDB that
+# block is dropped and only counted; everything else is printed as is.
+# Usage: print_pgdump_stderr <stderr_file> <timescaledb_info>
+print_pgdump_stderr() {
+    local errfile="$1" tsdb="$2" count
+    [ -s "$errfile" ] || return 0
+    if [ -z "$tsdb" ]; then
+        cat "$errfile"
+        return 0
+    fi
+    count=$(grep -c 'circular foreign-key constraints' "$errfile" || true)
+    awk '/circular foreign-key constraints/ { skip = 1; next }
+         skip && /^pg_dump: (detail|hint):/ { next }
+         { skip = 0; print }' "$errfile"
+    [ "$count" -gt 0 ] && printf '(%s expected TimescaleDB catalog notice(s) hidden) ' "$count"
+    return 0
 }
 
 # Move a file from TEMPDIR to the project backup dir, then remove the temp copy
@@ -197,8 +232,25 @@ for cont in $CONTAINERS; do
                 echo "⚠️  POSTGRES_USER not set in container '${CONTAINERNAME}', skipping dump."
                 continue
             fi
-            docker exec "${cont}" sh -c 'exec pg_dumpall -U "$0"' \
-                "${CONTAINERENV_DBUSER}" | "${DUMP_COMPRESS[@]}" > "${TEMPDIR}/${OUTPUT}"
+            # TimescaleDB: restore-docker needs the extension version of every
+            # database (same version, timescaledb_pre_restore). It goes into the
+            # dump as comment lines, which psql ignores.
+            TSDB_INFO=$(timescaledb_versions "$cont" "$CONTAINERENV_DBUSER")
+            DUMP_ERR="${TEMPDIR}/${CONTAINERNAME}.pg_dumpall.err"
+            if ! { if [ -n "$TSDB_INFO" ]; then
+                       sed 's/^/-- backup-docker timescaledb: /' <<< "$TSDB_INFO"
+                   fi
+                   docker exec "${cont}" sh -c 'exec pg_dumpall -U "$0"' \
+                       "${CONTAINERENV_DBUSER}" 2> "$DUMP_ERR"
+                 } | "${DUMP_COMPRESS[@]}" > "${TEMPDIR}/${OUTPUT}"; then
+                cat "$DUMP_ERR"
+                echo "❌ pg_dumpall failed in container '${CONTAINERNAME}'."
+                exit 1
+            fi
+            print_pgdump_stderr "$DUMP_ERR" "$TSDB_INFO"
+            if [ -n "$TSDB_INFO" ]; then
+                printf '(TimescaleDB %s) ' "$(awk '{ print $2 }' <<< "$TSDB_INFO" | sort -u | paste -sd,)"
+            fi
             commit_backup "$OUTPUT"
 
         # ---------------------------------------------------------------

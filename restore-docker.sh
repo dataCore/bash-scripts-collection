@@ -14,6 +14,9 @@
 # 2026-10-02 Postgres: empty check over all databases and fail-closed,
 #            restore fails on any error besides 'role/database already exists'.
 #            MariaDB/MySQL/MongoDB: no success message on import errors
+# 2026-10-13 PostgreSQL: TimescaleDB restore (version check, pre/post restore,
+#            catalog schemas ignored in the empty check), wait for the init
+#            phase of the image to finish (TCP instead of socket)
 #
 # INFO: Run from the docker-compose project directory, e.g.:
 #       cd /etc/docker-compose/datacoreipam/
@@ -75,6 +78,14 @@ check_import() {
         fi
         exit 1
     fi
+}
+
+# Run one SQL statement in a database of the selected PostgreSQL service.
+# stdin is /dev/null so callers can loop over a here-string.
+# Usage: pg_query <database> <sql>
+pg_query() {
+    docker compose exec -T "$SERVICENAME" \
+        psql -X -v ON_ERROR_STOP=1 -U "$CONTAINERENV_DBUSER" -d "$1" -tAc "$2" </dev/null | tr -d '\r'
 }
 
 # Map a backup filename to "<type> <suffix>"; prints nothing for unknown files.
@@ -404,6 +415,38 @@ elif [ "$TYPE" == postgres ]; then
     fi
     DBNAME="${CONTAINERENV_DBNAME:-postgres}"
     echo "  Database: '${DBNAME}', User: '${CONTAINERENV_DBUSER}'"
+    # During its init the image runs a temporary server on the socket only
+    # (listen_addresses=''), and a socket healthcheck already passes then. The
+    # init scripts (TimescaleDB: CREATE EXTENSION) must be done, so wait for TCP.
+    elapsed=0
+    until docker compose exec -T "$SERVICENAME" \
+        pg_isready -q -h 127.0.0.1 -U "$CONTAINERENV_DBUSER" >/dev/null 2>&1; do
+        if [ "$elapsed" -ge "$TIMEOUT" ]; then
+            echo "❌ Timeout after ${TIMEOUT}s: PostgreSQL in '${SERVICENAME}' does not answer on TCP."
+            exit 1
+        fi
+        sleep "$WAIT_INTERVAL"
+        elapsed=$(( elapsed + WAIT_INTERVAL ))
+    done
+
+    # TimescaleDB: backup-docker writes "-- backup-docker timescaledb: <db> <version>"
+    # at the top of the dump. Without that header (dumps before 2026-10-13) the
+    # databases that already have the extension in the target are used and the
+    # version cannot be checked.
+    TSDB_INFO=$( (decompress "$SELECTED" | head -n 50 \
+        | sed -n 's/^-- backup-docker timescaledb: //p') 2>/dev/null || true)
+    TSDB_UNCHECKED=false
+    if [ -z "$TSDB_INFO" ] \
+        && [ -n "$(pg_query "$DBNAME" "SELECT 1 FROM pg_available_extensions WHERE name = 'timescaledb'")" ]; then
+        for db in $(pg_query "$DBNAME" "SELECT datname FROM pg_database WHERE datallowconn"); do
+            if [ -n "$(pg_query "$db" "SELECT 1 FROM pg_extension WHERE extname = 'timescaledb'")" ]; then
+                TSDB_INFO+="${db} ?"$'\n'
+            fi
+        done
+        TSDB_INFO=$(sed '/^$/d' <<< "$TSDB_INFO")
+        [ -n "$TSDB_INFO" ] && TSDB_UNCHECKED=true
+    fi
+    [ -n "$TSDB_INFO" ] && echo "  TimescaleDB: $(paste -sd, <<< "$TSDB_INFO")"
     # A pg_dumpall dump only restores cleanly into a freshly initialised
     # instance. Into existing tables psql reports errors, keeps going and leaves
     # old rows in place (or duplicates them) – so refuse instead of mixing data.
@@ -427,7 +470,7 @@ elif [ "$TYPE" == postgres ]; then
     for db in "${PG_DBLIST[@]}"; do
         if ! COUNT=$(docker compose exec -T "$SERVICENAME" \
             psql -U "$CONTAINERENV_DBUSER" -d "$db" -tAc \
-            "SELECT count(*) FROM pg_catalog.pg_tables WHERE schemaname NOT IN ('pg_catalog','information_schema')" \
+            "SELECT count(*) FROM pg_catalog.pg_tables WHERE schemaname NOT IN ('pg_catalog','information_schema') AND schemaname !~ '^_?timescaledb'" \
             | tr -d '\r\n'); then
             COUNT=""
         fi
@@ -445,12 +488,53 @@ elif [ "$TYPE" == postgres ]; then
         echo "   volume (docker compose down; docker volume rm <volume>) and run again."
         exit 1
     fi
+    # TimescaleDB: the catalog must be restored into the same extension version,
+    # with timescaledb_pre_restore() before and timescaledb_post_restore() after.
+    # A database the dump would create itself is created here first, so the
+    # extension can be set up in it before the data arrives.
+    while read -r db ver; do
+        [ -n "$db" ] || continue
+        if [ -z "$(pg_query "$DBNAME" "SELECT 1 FROM pg_database WHERE datname = '${db}'")" ]; then
+            pg_query "$DBNAME" "CREATE DATABASE \"${db}\"" >/dev/null
+        fi
+        INSTALLED=$(pg_query "$db" "SELECT extversion FROM pg_extension WHERE extname = 'timescaledb'")
+        if [ "$ver" == "?" ]; then
+            :
+        elif [ -z "$INSTALLED" ]; then
+            if ! pg_query "$db" "CREATE EXTENSION timescaledb VERSION '${ver}'" >/dev/null; then
+                echo "❌ TimescaleDB ${ver} (from the dump) is not available in the image of '${SERVICENAME}'."
+                echo "   Available: $(pg_query "$DBNAME" "SELECT string_agg(version, ', ') FROM pg_available_extension_versions WHERE name = 'timescaledb'")"
+                exit 1
+            fi
+        elif [ "$INSTALLED" != "$ver" ]; then
+            echo "❌ Database '${db}': the image has TimescaleDB ${INSTALLED}, the dump was made with ${ver}."
+            echo "   Pin the image to ${ver} (e.g. timescale/timescaledb:${ver}-pg<major>), remove the"
+            echo "   database volume and run again. Update TimescaleDB after the restore."
+            exit 1
+        fi
+    done <<< "$TSDB_INFO"
+    # Only after every version matched, so an abort leaves no database in restoring mode.
+    while read -r db _; do
+        [ -n "$db" ] || continue
+        pg_query "$db" "SELECT timescaledb_pre_restore()" >/dev/null
+    done <<< "$TSDB_INFO"
+    if [ "$TSDB_UNCHECKED" == true ]; then
+        echo "⚠️  The dump has no TimescaleDB header (made before 2026-10-13): the version"
+        echo "   cannot be checked. The image must have the same TimescaleDB version as"
+        echo "   the server that made the dump."
+    fi
+
     # psql keeps going after SQL errors and still exits 0, so its stderr decides.
     # Expected on a fresh instance: 'role ... already exists' and
     # 'database ... already exists' for the user/DB the image created at init.
     IMPORT_RC=0
     IMPORT_STDERR=$( { decompress "$SELECTED" | docker compose exec -T "$SERVICENAME" \
         psql -q -U "$CONTAINERENV_DBUSER" -d "$DBNAME" >/dev/null; } 2>&1 ) || IMPORT_RC=$?
+    # Leave restoring mode even if the import failed, then judge the import.
+    while read -r db _; do
+        [ -n "$db" ] || continue
+        pg_query "$db" "SELECT timescaledb_post_restore()" >/dev/null
+    done <<< "$TSDB_INFO"
     PG_EXPECTED_RE='ERROR:  (role|database) ".*" already exists$'
     check_import "PostgreSQL" "$IMPORT_RC" "$IMPORT_STDERR" 'ERROR:|FATAL:' "$PG_EXPECTED_RE"
     PG_EXPECTED=$(grep -cE "$PG_EXPECTED_RE" <<< "$IMPORT_STDERR" || true)
