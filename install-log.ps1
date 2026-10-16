@@ -156,7 +156,10 @@ function Test-Preconditions {
     foreach ($f in $needed) {
         if (-not (Test-Path (Join-Path $SourceDir $f))) { Stop-Script "logconfs\$f is missing." }
     }
-    $version = (& $FbBin --version 2>$null | Select-Object -First 1)
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try     { $version = (& $FbBin --version 2>&1 | ForEach-Object { "$_" } | Select-Object -First 1) }
+    finally { $ErrorActionPreference = $prev }
     Write-Ok "Fluent Bit found: $version"
 }
 
@@ -357,8 +360,19 @@ $includeLines
 function Set-ServicePath {
     Write-Section 'Pointing the Service at Our Config'
 
-    & $FbBin -c $DcConf --dry-run *> $null
-    if ($LASTEXITCODE -ne 0) { Stop-Script "Configuration validation failed. Check: & '$FbBin' -c '$DcConf' --dry-run" }
+    # Fluent Bit prints its banner on stderr. Windows PowerShell 5.1 turns
+    # redirected stderr of a native command into an error record, which
+    # $ErrorActionPreference = 'Stop' would make fatal - so judge by exit code.
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $out  = & $FbBin -c $DcConf --dry-run 2>&1 | ForEach-Object { "$_" }
+        $code = $LASTEXITCODE
+    } finally { $ErrorActionPreference = $prev }
+    if ($code -ne 0) {
+        $out | Select-Object -Last 10 | ForEach-Object { Write-Host "         $_" -ForegroundColor Red }
+        Stop-Script "Configuration validation failed (exit $code). Check: & '$FbBin' -c '$DcConf' --dry-run"
+    }
     Write-Ok 'Configuration validated successfully'
 
     $pathName = "`"$FbBin`" -c `"$DcConf`""
