@@ -68,7 +68,7 @@ bash /usr/bin/datacore/bash/link.sh
 
 | Directory | Used by | Contents |
 |---|---|---|
-| `logconfs/` | `install-log.sh`, `install-log.ps1` | Fluent Bit input configs: `linux.conf`, `docker.conf`, `proxmox.conf`, `unifi.conf`, `bmc.conf`, `truenas.conf` (Linux); `windows.conf`, `hmail.conf` (Windows). | |
+| `logconfs/` | `install-log.sh`, `install-log.ps1` | Fluent Bit input configs: `linux.conf`, `docker.conf`, `proxmox.conf`, `unifi.conf`, `bmc.conf`, `truenas.conf` (Linux); `windows.conf`, `dc.conf`, `hmail.conf` (Windows). | |
 | `pubkeys/` | `install-ssh.sh` | One SSH public key file per user, named `<username>.pub`. |
 
 ## Provisioning a new server
