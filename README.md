@@ -1,6 +1,6 @@
 # bash-scripts-collection
 
-Bash scripts for provisioning and maintaining Debian-based servers: SSH hardening,
+Bash scripts for provisioning and maintaining Debian-based servers (plus `install-log.ps1` for Windows Server): SSH hardening,
 Docker installation, monitoring and log agents, swap setup, Docker Compose backup and
 restore, and unattended system updates.
 
@@ -29,6 +29,7 @@ bash /usr/bin/datacore/bash/link.sh
 | `install-dockeradminagent.sh` | `--core-ip <ip>[,<ip>...] --core-public-key <key>` | Installs [Komodo](https://komo.do) Periphery as the systemd service `periphery`: pinned release, sha256-verified. The first run writes `/etc/komodo/periphery.config.toml` (root-only): inbound only on port 8120, only Komodo Core's address and public key accepted, no host shell through the web UI. Stack secrets go into its `[secrets]` section and never leave the host. Run again without arguments to update the binary; the config is never overwritten. |
 | `install-mon.sh` | `<monitoring-server>` | Installs Zabbix Agent2 with PSK encryption, generates the PSK and prints the matching host configuration for the Zabbix frontend. |
 | `install-log.sh` | `--host <fqdn> [--docker] [--proxmox] [--unifi] [--bmc] [--user <email>] [--pass <secret>] [--vlan <id>] [--org <name>]` | Installs Fluent Bit and ships logs to OpenObserve. Source configs live in `logconfs/` (`linux` always, the rest on demand). IP and VLAN are auto-detected. Configuration is written to `/etc/fluent-bit/datacore.conf` and `datacore.env` and wired in through a systemd drop-in, so the packaged `fluent-bit.conf` stays untouched and `apt upgrade` never triggers a conffile prompt. |
+| `install-log.ps1` | `-O2Host <fqdn> [-Dc] [-Hmail] [-User <email>] [-Pass <secret>] [-Vlan <id>] [-Org <name>]` | Windows counterpart of `install-log.sh` (Windows Server, PowerShell 5.1, run as Administrator). Fluent Bit must already be installed and may be updated freely (installer, winget, UniGetUI). Writes its own config to `C:\ProgramData\fluent-bit\` (`datacore.conf`, credentials in `datacore-secrets.conf` readable by SYSTEM and Administrators only, `conf.d\`, DB, disk buffer, agent log) and points the `fluent-bit` service at it through the Service Control Manager. The installer's `fluent-bit.conf` is never used, because every update overwrites it. Verifies the credentials before the restart and checks the agent log afterwards. A hand-made setup in the install directory is moved to `legacy-<timestamp>\` and its DB files are taken over. Run with `powershell -ExecutionPolicy Bypass -File .\install-log.ps1 -O2Host log.geek.ch -Hmail`. |
 | `install-swap.sh` | `[--size <n>] [--swappiness <n>] [--remove-old] [--fix-resume] [--dry-run]` | Sets up `/pagefile.sys` including fstab entry and persistent `vm.swappiness` (default 10). Size defaults to RAM, capped at 8G and floored at 2G. `--remove-old` disables previous swap partitions or files and cleans up fstab. Refuses to run inside LXC containers, where `pct set <ctid> -swap` is the correct tool. |
 | `komodo-migrate-env.sh` | `<project-dir> [<secret-prefix>]` | Moves a Compose project's `.env` into a Komodo stack: secrets (names ending in `TOKEN`, `SECRET`, `PASSWORD`, `PASS`, `_KEY`) go to the `[secrets]` of the local Periphery as `<PREFIX>_<NAME>`, and the script prints the stack Environment with `[[<PREFIX>_<NAME>]]` placeholders to paste into Komodo. Periphery fills them in on the host, so secret values never reach Komodo Core. The `.env` is left unchanged; re-running skips secrets already there. |
 
@@ -67,7 +68,7 @@ bash /usr/bin/datacore/bash/link.sh
 
 | Directory | Used by | Contents |
 |---|---|---|
-| `logconfs/` | `install-log.sh` | Fluent Bit input configs: `linux.conf`, `docker.conf`, `proxmox.conf`, `unifi.conf`, `bmc.conf`, `windows.conf`. |
+| `logconfs/` | `install-log.sh`, `install-log.ps1` | Fluent Bit input configs: `linux.conf`, `docker.conf`, `proxmox.conf`, `unifi.conf`, `bmc.conf`, `truenas.conf` (Linux); `windows.conf`, `dc.conf`, `hmail.conf` (Windows). | |
 | `pubkeys/` | `install-ssh.sh` | One SSH public key file per user, named `<username>.pub`. |
 
 ## Provisioning a new server
