@@ -37,6 +37,7 @@ BLUE='\033[0;34m'; CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
 # Packages the script needs, plus the baseline toolset every dataCore host gets.
 REQUIRED_PACKAGES=(
     openssh-server fail2ban figlet          # needed by this script
+    python3-systemd                         # fail2ban journal backend
     sudo net-tools vim htop git wget curl gpg
 )
 
@@ -431,8 +432,9 @@ ${FAIL2BAN_IGNORE_LINE}
 [sshd]
 enabled  = true
 port     = ${SSH_PORT}
-logpath  = %(sshd_log)s
-backend  = %(sshd_backend)s
+# Read sshd from the journal: Debian 12+ ships without rsyslog, so
+# /var/log/auth.log may not exist and the file backend fails to start.
+backend  = systemd
 maxretry = 5
 bantime  = ${FAIL2BAN_BANTIME}
 EOF
@@ -443,9 +445,14 @@ EOF
     ok "Fail2ban jail configured: 5 attempts → ${FAIL2BAN_BANTIME} ban"
     info "Jail file: ${FAIL2BAN_JAIL}"
 
-    # Show status
-    sleep 1
-    if systemctl is-active --quiet fail2ban; then
+    # fail2ban-server configures jails asynchronously and exits on a bad jail
+    # a moment after systemd reports it started — wait for the socket instead.
+    local i
+    for i in {1..10}; do
+        fail2ban-client ping &>/dev/null && break
+        sleep 1
+    done
+    if fail2ban-client status sshd &>/dev/null; then
         ok "Fail2ban is running"
     else
         warn "Fail2ban failed to start — check: journalctl -u fail2ban"
