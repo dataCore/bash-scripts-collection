@@ -190,11 +190,16 @@ function Get-Network {
 function Get-Credentials {
     Write-Section 'OpenObserve Credentials'
 
-    if (-not $User) { $script:User = Read-Host '  OpenObserve user' }
+    # Prompt with Write-Host: the Read-Host prompt text is not shown in every host
+    if (-not $User) {
+        Write-Host '  OpenObserve user: ' -NoNewline
+        $script:User = Read-Host
+    }
     if (-not $User) { Stop-Script 'User cannot be empty.' }
 
     if (-not $Pass) {
-        $secure = Read-Host '  OpenObserve password' -AsSecureString
+        Write-Host '  OpenObserve password (hidden): ' -NoNewline
+        $secure = Read-Host -AsSecureString
         $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
         try     { $script:Pass = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr) }
         finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
