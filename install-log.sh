@@ -524,7 +524,6 @@ step_deploy_confd() {
     if $OPT_PROXMOX; then
         cp "${confd_source}/proxmox.conf" "${CONFD}/proxmox.conf"
         ok "Deployed: proxmox.conf"
-        migrate_proxmox_db
     fi
     if $OPT_UNIFI; then
         cp "${confd_source}/unifi.conf" "${CONFD}/unifi.conf"
@@ -544,7 +543,9 @@ step_deploy_confd() {
 # /var/lib/fluent-bit with the other state. Copy the old DB over so the
 # offsets survive and task lines already shipped are not sent again.
 # Fluent Bit is stopped first: the DB is SQLite in WAL mode, and a copy
-# taken while it writes can be inconsistent. The restart follows in step 7.
+# taken while it writes can be inconsistent. Called from step 7 right before
+# the restart, after the last check that can abort — a die() in between
+# would otherwise leave the agent stopped.
 migrate_proxmox_db() {
     [[ -f "$PROXMOX_DB_OLD" && ! -e "$PROXMOX_DB" ]] || return 0
     if systemctl is-active --quiet fluent-bit; then
@@ -552,8 +553,14 @@ migrate_proxmox_db() {
     fi
     local suffix
     for suffix in "" -wal -shm; do
-        if [[ -f "${PROXMOX_DB_OLD}${suffix}" ]]; then
-            cp -p "${PROXMOX_DB_OLD}${suffix}" "${PROXMOX_DB}${suffix}"
+        [[ -f "${PROXMOX_DB_OLD}${suffix}" ]] || continue
+        # A failed copy must not abort here: the service is stopped and the
+        # restart below would never run. Fluent Bit then starts without
+        # offsets (Read_from_Head Off), which only skips old task lines.
+        if ! cp -p "${PROXMOX_DB_OLD}${suffix}" "${PROXMOX_DB}${suffix}"; then
+            rm -f "$PROXMOX_DB" "${PROXMOX_DB}-wal" "${PROXMOX_DB}-shm"
+            warn "Could not copy ${PROXMOX_DB_OLD}${suffix} — starting with a fresh tail DB"
+            return 0
         fi
     done
     ok "Proxmox tail DB copied: ${PROXMOX_DB_OLD} -> ${PROXMOX_DB}"
@@ -664,6 +671,10 @@ step_enable_fluent_bit() {
         ok "Configuration validated successfully"
     else
         die "Configuration validation failed. Check ${DC_CONF}"
+    fi
+
+    if $OPT_PROXMOX; then
+        migrate_proxmox_db
     fi
 
     systemctl enable --quiet fluent-bit
