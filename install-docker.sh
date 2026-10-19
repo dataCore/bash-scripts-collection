@@ -187,8 +187,11 @@ try:
         cfg["ip6tables"] = True
         # Only when absent: never move the networks of an existing host and
         # never undo a log-driver set by someone else (install-log.sh --docker)
-        cfg.setdefault("default-address-pools", [{"base": args[1], "size": int(args[2])}])
-        cfg.setdefault("fixed-cidr-v6", args[3])
+        # An empty list counts as missing: "pools" saw none and derived one
+        if not cfg.get("default-address-pools"):
+            cfg["default-address-pools"] = [{"base": args[1], "size": int(args[2])}]
+        if not cfg.get("fixed-cidr-v6"):
+            cfg["fixed-cidr-v6"] = args[3]
         cfg.setdefault("live-restore", False)
         if "log-driver" not in cfg:
             cfg["log-driver"] = "json-file"
@@ -435,10 +438,15 @@ step_add_docker_repo() {
     echo "$desired_line" > "$DOCKER_SOURCE"
     ok "Repository added: ${DOCKER_DISTRO}/${DOCKER_CODENAME} (${arch})"
 
-    # The old dearmored key is unused once the source points at the .asc
+    # The old dearmored key is unused once our source points at the .asc —
+    # unless another source (e.g. a hand-made docker.sources) still uses it.
     if [[ -f "$DOCKER_KEYRING_OLD" ]]; then
-        rm -f "$DOCKER_KEYRING_OLD"
-        ok "Removed old key ${DOCKER_KEYRING_OLD}"
+        if grep -rqsF "$DOCKER_KEYRING_OLD" /etc/apt/sources.list /etc/apt/sources.list.d/; then
+            info "Keeping ${DOCKER_KEYRING_OLD} — still referenced by another apt source"
+        else
+            rm -f "$DOCKER_KEYRING_OLD"
+            ok "Removed old key ${DOCKER_KEYRING_OLD}"
+        fi
     fi
 
     apt_update
