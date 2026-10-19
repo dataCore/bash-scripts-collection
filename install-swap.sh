@@ -33,7 +33,9 @@
 #   -h, --help        Show this help
 #
 # Re-running is safe and idempotent: an existing /pagefile.sys of the right
-# size is left alone, a differing size is rebuilt (swapoff -> recreate -> swapon).
+# size is left alone (or just activated if it is not in use), a differing size
+# is rebuilt (swapoff -> recreate -> swapon). On btrfs the file is created with
+# `btrfs filesystem mkswapfile` when btrfs-progs provides it (>= 6.1).
 #
 # Examples:
 #   install-swap.sh                          # auto size, server swappiness
@@ -76,6 +78,7 @@ CURRENT_MB=0
 ROOT_FSTYPE=""
 OLD_SWAPS=()
 REMOVED_BLOCKDEV=false
+REMOVED_IDS=()      # paths and UUID=… of swap partitions/LVs taken out of fstab
 
 # =============================================================================
 # Helpers
@@ -363,6 +366,8 @@ step_remove_old() {
 
         # Print — never run — the destructive reclaim step
         REMOVED_BLOCKDEV=true
+        REMOVED_IDS+=("$dev")
+        [[ -n "$uuid" ]] && REMOVED_IDS+=("UUID=${uuid}" "$uuid")
         echo ""
         if [[ "$(lsblk -no TYPE "$dev" 2>/dev/null | head -1)" == "lvm" ]]; then
             info "To reclaim the LVM volume ${BOLD}${dev}${NC} (destructive, do this manually):"
@@ -384,6 +389,28 @@ step_remove_old() {
     else
         ok "Old swap removed completely"
     fi
+
+    # Hibernation resume still pointing at the removed swap makes the next boot
+    # wait for it ("Gave up waiting for suspend/resume device").
+    if [[ "$OPT_FIX_RESUME" == false ]] && resume_points_to_removed; then
+        echo ""
+        warn "The resume config still points to the removed swap — the next boot will stall waiting for it."
+        info "Re-run with ${BOLD}--fix-resume${NC} (or add it now) to clear it."
+    fi
+}
+
+# True if RESUME= in initramfs-tools or resume= on the kernel command line
+# names one of the swap devices removed above.
+resume_points_to_removed() {
+    (( ${#REMOVED_IDS[@]} > 0 )) || return 1
+    local refs="" id
+    [[ -f "$RESUME_CONF" ]] && refs+=$(grep -oE '^[[:space:]]*RESUME=[^[:space:]#]+' "$RESUME_CONF" | sed 's/.*RESUME=//' || true)
+    [[ -f /etc/default/grub ]] && refs+=" "$(grep -oE 'resume=[^[:space:]"]+' /etc/default/grub | sed 's/^resume=//' || true)
+    for id in "${REMOVED_IDS[@]}"; do
+        # shellcheck disable=SC2076  # literal match is intended here
+        [[ " ${refs//$'\n'/ } " =~ " ${id} " ]] && return 0
+    done
+    return 1
 }
 
 # =============================================================================
@@ -397,8 +424,24 @@ step_create_swapfile() {
     if [[ -f "$SWAPFILE" ]]; then
         local current_bytes
         current_bytes=$(stat -c %s "$SWAPFILE")
-        if (( current_bytes == target_bytes )) && grep -q "^${SWAPFILE} " /proc/swaps; then
-            ok "${SWAPFILE} already exists at $(fmt_mb "$TARGET_MB") and is active — nothing to do"
+        if (( current_bytes == target_bytes )); then
+            if grep -q "^${SWAPFILE} " /proc/swaps; then
+                ok "${SWAPFILE} already exists at $(fmt_mb "$TARGET_MB") and is active — nothing to do"
+                return 0
+            fi
+            # Right size, just not active (e.g. fstab entry missing): no need
+            # to rewrite gigabytes — swapon, and mkswap only without a signature.
+            info "${SWAPFILE} exists at $(fmt_mb "$TARGET_MB") but is inactive — activating"
+            run chmod 600 "$SWAPFILE"
+            run chown root:root "$SWAPFILE"
+            if [[ "$(blkid -p -s TYPE -o value "$SWAPFILE" 2>/dev/null || true)" == "swap" ]]; then
+                ok "Swap signature present"
+            else
+                run mkswap "$SWAPFILE"
+                ok "Swap signature written"
+            fi
+            run swapon "$SWAPFILE"
+            ok "Swap file activated"
             return 0
         fi
         info "${SWAPFILE} exists at $(fmt_mb $(( current_bytes / 1024 / 1024 )))— rebuilding to $(fmt_mb "$TARGET_MB")"
@@ -409,9 +452,16 @@ step_create_swapfile() {
         run rm -f "$SWAPFILE"
     fi
 
-    if [[ "$ROOT_FSTYPE" == "btrfs" ]]; then
-        # btrfs swap files must be nocow and unallocated-extent-free, so the
-        # file has to be created empty, flagged, then written with dd.
+    local has_signature=false
+    if [[ "$ROOT_FSTYPE" == "btrfs" ]] && btrfs filesystem mkswapfile --help >/dev/null 2>&1; then
+        # btrfs-progs >= 6.1 creates a nocow, fully allocated swap file
+        # including the signature in one step.
+        info "btrfs detected — creating swap file with btrfs filesystem mkswapfile"
+        run btrfs filesystem mkswapfile --size "${TARGET_MB}m" "$SWAPFILE"
+        has_signature=true
+    elif [[ "$ROOT_FSTYPE" == "btrfs" ]]; then
+        # Older btrfs-progs: swap files must be nocow and unallocated-extent-free,
+        # so the file has to be created empty, flagged, then written with dd.
         info "btrfs detected — creating swap file nocow (chattr +C)"
         run truncate -s 0 "$SWAPFILE"
         run chattr +C "$SWAPFILE"
@@ -426,8 +476,10 @@ step_create_swapfile() {
     run chown root:root "$SWAPFILE"
     ok "Permissions set to 600 root:root"
 
-    run mkswap "$SWAPFILE"
-    ok "Swap signature written"
+    if [[ "$has_signature" == false ]]; then
+        run mkswap "$SWAPFILE"
+        ok "Swap signature written"
+    fi
 
     run swapon "$SWAPFILE"
     ok "Swap file activated"
