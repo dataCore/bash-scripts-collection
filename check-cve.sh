@@ -61,10 +61,23 @@ for arg in "$@"; do
 done
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
-ok()   { echo -e "  ${GREEN}[OK]${RESET}   $*"; }
-warn() { echo -e "  ${RED}[WARN]${RESET} $*"; }
-info() { echo -e "  ${CYAN}[INFO]${RESET} $*"; }
-miss() { echo -e "  ${YELLOW}[MISS]${RESET} $*"; }
+# In JSON mode stdout must carry nothing but the JSON document.
+ok()   { [[ "$MODE" == "json" ]] && return 0; echo -e "  ${GREEN}[OK]${RESET}   $*"; }
+warn() { [[ "$MODE" == "json" ]] && return 0; echo -e "  ${RED}[WARN]${RESET} $*"; }
+info() { [[ "$MODE" == "json" ]] && return 0; echo -e "  ${CYAN}[INFO]${RESET} $*"; }
+miss() { [[ "$MODE" == "json" ]] && return 0; echo -e "  ${YELLOW}[MISS]${RESET} $*"; }
+
+# Escape a string for use inside a JSON string literal.
+json_escape() {
+    local s="$1"
+    s=${s//\\/\\\\}
+    s=${s//\"/\\\"}
+    s=${s//$'\n'/\\n}
+    s=${s//$'\r'/\\r}
+    s=${s//$'\t'/\\t}
+    # Drop any remaining control characters
+    printf '%s' "$s" | tr -d '\000-\037'
+}
 
 # Collect JSON results
 declare -A JSON_FIELDS
@@ -493,7 +506,9 @@ fi
 ACTIVE_CIFS=$(mount 2>/dev/null | grep -c "type cifs" || true)
 if [[ "$ACTIVE_CIFS" -gt 0 ]]; then
     info "Active CIFS mounts: ${ACTIVE_CIFS} – cifs module will remain loaded"
-    mount 2>/dev/null | grep "type cifs" | awk '{print "    "$0}' || true
+    if [[ "$MODE" != "json" ]]; then
+        mount 2>/dev/null | grep "type cifs" | awk '{print "    "$0}' || true
+    fi
 fi
 
 # 6f. Check if sysctl mitigation is already persisted
@@ -915,27 +930,35 @@ if [[ "$MODE" == "json" ]]; then
     KERNEL=$(uname -r)
     OS=$(grep PRETTY_NAME /etc/os-release 2>/dev/null | cut -d'"' -f2 || echo "unknown")
     DATE=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+    # String member: "key": "escaped value",
+    _jstr() { printf '  "%s": "%s",\n' "$1" "$(json_escape "$2")"; }
+    # Boolean member: anything but "true" is emitted as false
+    _jbool() {
+        local v=false sep="${3-,}"
+        [[ "$2" == "true" ]] && v=true
+        printf '  "%s": %s%s\n' "$1" "$v" "$sep"
+    }
     printf '{\n'
-    printf '  "hostname": "%s",\n'      "$HOSTNAME"
-    printf '  "kernel": "%s",\n'        "$KERNEL"
-    printf '  "os": "%s",\n'            "$OS"
-    printf '  "checked_at": "%s",\n'    "$DATE"
-    printf '  "CVE_2026_31431_copyfail": "%s",\n'  "${JSON_FIELDS[copyfail]}"
-    printf '  "CVE_2026_43284_dirtyfrag": "%s",\n' "${JSON_FIELDS[dirtyfrag]}"
-    printf '  "CVE_2026_46300_fragnesia": "%s",\n' "${JSON_FIELDS[fragnesia]}"
-    printf '  "CVE_2026_23268_crackarmor": "%s",\n' "${JSON_FIELDS[crackarmor]:-unknown}"
-    printf '  "crackarmor_apparmor": "%s",\n'        "${JSON_FIELDS[crackarmor_apparmor]:-unknown}"
-    printf '  "CVE_2026_46333_ptrace": "%s",\n'      "${JSON_FIELDS[ptrace_mmnull]:-unknown}"
-    printf '  "patch_copyfail": "%s",\n'             "${JSON_FIELDS[patch_copyfail]:-unknown}"
-    printf '  "patch_dirtyfrag": "%s",\n'            "${JSON_FIELDS[patch_dirtyfrag]:-unknown}"
-    printf '  "patch_fragnesia": "%s",\n'            "${JSON_FIELDS[patch_fragnesia]:-unknown}"
-    printf '  "patch_ptrace": "%s",\n'               "${JSON_FIELDS[patch_ptrace]:-unknown}"
-    printf '  "cifswitch": "%s",\n'                   "${JSON_FIELDS[cifswitch]:-unknown}"
-    printf '  "cifswitch_userns": %s,\n'              "${JSON_FIELDS[cifswitch_userns]:-false}"
-    printf '  "cifswitch_upcall": %s,\n'              "${JSON_FIELDS[cifswitch_upcall]:-false}"
-    printf '  "patch_cifswitch": "%s",\n'             "${JSON_FIELDS[patch_cifswitch]:-unknown}"
-    printf '  "patch_cifswitch_utils": "%s",\n'       "${JSON_FIELDS[patch_cifswitch_utils]:-unknown}"
-    printf '  "ipsec_active": %s\n'      "${JSON_FIELDS[ipsec_active]}"
+    _jstr hostname   "$HOSTNAME"
+    _jstr kernel     "$KERNEL"
+    _jstr os         "$OS"
+    _jstr checked_at "$DATE"
+    _jstr CVE_2026_31431_copyfail   "${JSON_FIELDS[copyfail]}"
+    _jstr CVE_2026_43284_dirtyfrag  "${JSON_FIELDS[dirtyfrag]}"
+    _jstr CVE_2026_46300_fragnesia  "${JSON_FIELDS[fragnesia]}"
+    _jstr CVE_2026_23268_crackarmor "${JSON_FIELDS[crackarmor]:-unknown}"
+    _jstr crackarmor_apparmor       "${JSON_FIELDS[crackarmor_apparmor]:-unknown}"
+    _jstr CVE_2026_46333_ptrace     "${JSON_FIELDS[ptrace_mmnull]:-unknown}"
+    _jstr patch_copyfail            "${JSON_FIELDS[patch_copyfail]:-unknown}"
+    _jstr patch_dirtyfrag           "${JSON_FIELDS[patch_dirtyfrag]:-unknown}"
+    _jstr patch_fragnesia           "${JSON_FIELDS[patch_fragnesia]:-unknown}"
+    _jstr patch_ptrace              "${JSON_FIELDS[patch_ptrace]:-unknown}"
+    _jstr cifswitch                 "${JSON_FIELDS[cifswitch]:-unknown}"
+    _jbool cifswitch_userns         "${JSON_FIELDS[cifswitch_userns]:-false}"
+    _jbool cifswitch_upcall         "${JSON_FIELDS[cifswitch_upcall]:-false}"
+    _jstr patch_cifswitch           "${JSON_FIELDS[patch_cifswitch]:-unknown}"
+    _jstr patch_cifswitch_utils     "${JSON_FIELDS[patch_cifswitch_utils]:-unknown}"
+    _jbool ipsec_active             "${JSON_FIELDS[ipsec_active]:-false}" ""
     printf '}\n'
     exit 0
 fi
