@@ -331,8 +331,8 @@ if [[ "$CRACKARMOR_APPARMOR" == "active" ]]; then
             perms=$(stat -c '%a' "${AA_FS}/${iface}" 2>/dev/null || echo "unknown")
             if [[ "$perms" == "unknown" ]]; then
                 miss "  ${AA_FS}/${iface}: cannot read permissions"
-            elif [[ "$perms" =~ [2367] ]]; then
-                # world-writable or group-writable bit set
+            elif (( 8#$perms & 8#022 )); then
+                # world-writable or group-writable bit set (owner bits ignored)
                 warn "  ${AA_FS}/${iface}: permissions ${perms} – world/group-writable (unpatched kernel)"
                 CRACKARMOR_STATUS="vulnerable"
             else
