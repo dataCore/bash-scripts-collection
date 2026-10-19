@@ -522,6 +522,29 @@ step_harden_sshd() {
 
     mkdir -p /etc/ssh/sshd_config.d
 
+    # Key exchange: post-quantum hybrids first (mlkem768x25519 from OpenSSH 9.9,
+    # sntrup761x25519 from 8.5), then the classic ones. Only names this OpenSSH
+    # knows: an unknown one fails `sshd -t` and rolls the whole config back.
+    # sshd has no -Q; `ssh -Q kex` asks the client, which openssh-server pulls
+    # in at the same version.
+    local kex_wanted="mlkem768x25519-sha256 sntrup761x25519-sha512 sntrup761x25519-sha512@openssh.com curve25519-sha256 curve25519-sha256@libssh.org diffie-hellman-group16-sha512 diffie-hellman-group18-sha512"
+    local kex_supported kex_list="" kex
+    kex_supported=$(ssh -Q kex 2>/dev/null || true)
+    for kex in $kex_wanted; do
+        if grep -qxF "$kex" <<<"$kex_supported"; then
+            kex_list="${kex_list:+${kex_list},}${kex}"
+        fi
+    done
+    if [[ -z "$kex_list" ]]; then
+        kex_list="curve25519-sha256,curve25519-sha256@libssh.org,diffie-hellman-group16-sha512,diffie-hellman-group18-sha512"
+        warn "ssh -Q kex gave nothing — falling back to the classic key exchange list"
+    fi
+    if [[ "$kex_list" == *mlkem768x25519* || "$kex_list" == *sntrup761x25519* ]]; then
+        ok "Post-quantum key exchange enabled"
+    else
+        warn "This OpenSSH has no post-quantum key exchange — clients will warn"
+    fi
+
     cat > "$SSHD_HARDENED_DROP" <<EOF
 # =============================================================================
 # dataCore Hardened SSH Configuration
@@ -571,7 +594,7 @@ LogLevel VERBOSE
 
 # Only allow strong algorithms
 HostKeyAlgorithms ssh-ed25519,rsa-sha2-512,rsa-sha2-256
-KexAlgorithms curve25519-sha256,curve25519-sha256@libssh.org,diffie-hellman-group16-sha512,diffie-hellman-group18-sha512
+KexAlgorithms ${kex_list}
 Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com
 MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com
 EOF
