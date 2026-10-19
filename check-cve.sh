@@ -515,18 +515,31 @@ else
 fi
 
 # 6c. Unprivileged user namespaces enabled?
+#     kernel.unprivileged_userns_clone is a Debian/Ubuntu kernel patch. Other
+#     kernels only have user.max_user_namespaces (0 = no new user namespaces).
 USERNS_ENABLED=false
+USERNS_SYSCTL="kernel.unprivileged_userns_clone"
 USERNS_VAL=$(sysctl -n kernel.unprivileged_userns_clone 2>/dev/null || \
              cat /proc/sys/kernel/unprivileged_userns_clone 2>/dev/null || echo "unknown")
+USERNS_SHOWN="$USERNS_VAL"
+if [[ "$USERNS_VAL" == "unknown" ]]; then
+    MAXNS=$(sysctl -n user.max_user_namespaces 2>/dev/null || \
+            cat /proc/sys/user/max_user_namespaces 2>/dev/null || echo "unknown")
+    if [[ "$MAXNS" =~ ^[0-9]+$ ]]; then
+        USERNS_SYSCTL="user.max_user_namespaces"
+        USERNS_SHOWN="$MAXNS"
+        if (( MAXNS > 0 )); then USERNS_VAL=1; else USERNS_VAL=0; fi
+    fi
+fi
 if [[ "$USERNS_VAL" == "1" ]]; then
-    warn "kernel.unprivileged_userns_clone=1 – namespace switch attack path OPEN"
+    warn "${USERNS_SYSCTL}=${USERNS_SHOWN} – namespace switch attack path OPEN"
     USERNS_ENABLED=true
     CIFSWITCH_STATUS="${CIFSWITCH_STATUS}+userns"
 elif [[ "$USERNS_VAL" == "0" ]]; then
-    ok "kernel.unprivileged_userns_clone=0 – namespace attack path BLOCKED"
+    ok "${USERNS_SYSCTL}=0 – namespace attack path BLOCKED"
     CIFSWITCH_STATUS="${CIFSWITCH_STATUS}_userns_blocked"
 else
-    miss "kernel.unprivileged_userns_clone not readable (value: ${USERNS_VAL})"
+    miss "Neither kernel.unprivileged_userns_clone nor user.max_user_namespaces readable"
 fi
 
 # 6d. Full exploitability summary
@@ -552,11 +565,12 @@ if [[ "$ACTIVE_CIFS" -gt 0 ]]; then
 fi
 
 # 6f. Check if sysctl mitigation is already persisted
-if grep -rq "unprivileged_userns_clone.*=.*0" /etc/sysctl.d/ /etc/sysctl.conf 2>/dev/null; then
-    ok "kernel.unprivileged_userns_clone=0 is persisted in sysctl.d"
+if grep -rqsE "^[[:space:]]*${USERNS_SYSCTL//./[./]}[[:space:]]*=[[:space:]]*0[[:space:]]*$" \
+        /etc/sysctl.d/ /etc/sysctl.conf; then
+    ok "${USERNS_SYSCTL}=0 is persisted in sysctl.d"
 else
     if [[ "$USERNS_ENABLED" == "true" ]]; then
-        miss "No persistent sysctl mitigation found for unprivileged_userns_clone"
+        miss "No persistent sysctl mitigation found for ${USERNS_SYSCTL}"
     fi
 fi
 
@@ -927,20 +941,38 @@ if [[ "$MODE" == "fix" ]]; then
 
     # CIFSwitch mitigation
     echo -e "\n${BOLD}  [CIFSwitch]${RESET}"
-    # Preferred: disable unprivileged user namespaces (lowest impact, blocks exploit chain)
-    if [[ "${USERNS_ENABLED:-true}" == "true" ]]; then
-        echo "kernel.unprivileged_userns_clone=0" > /etc/sysctl.d/99-cifswitch.conf
-        sysctl -w kernel.unprivileged_userns_clone=0 2>/dev/null || true
-        ok "kernel.unprivileged_userns_clone=0 set (persisted to /etc/sysctl.d/99-cifswitch.conf)"
-        info "  Note: some desktop features (browsers, containers) may require userns."
-        info "  If needed, re-enable with: sudo sysctl -w kernel.unprivileged_userns_clone=1"
-    else
-        ok "kernel.unprivileged_userns_clone already 0 – CIFSwitch blocked"
-    fi
-    # If cifs-utils not needed, offer removal hint
-    if [[ "${CIFSUTILS_INSTALLED:-false}" == "true" ]]; then
-        info "  cifs.upcall is installed. If Kerberos CIFS mounts are not used:"
+    # Without cifs.upcall the exploit chain is broken – leave userns alone,
+    # disabling it would only cost container/sandbox functionality.
+    if [[ "$CIFSUTILS_INSTALLED" != "true" ]]; then
+        ok "cifs.upcall not installed – CIFSwitch not exploitable, user namespaces left unchanged"
+    elif [[ "$USERNS_ENABLED" != "true" ]]; then
+        if [[ "$USERNS_VAL" == "0" ]]; then
+            ok "${USERNS_SYSCTL} already 0 – CIFSwitch blocked"
+        else
+            miss "User namespace state unknown – sysctl mitigation not applied"
+        fi
+        info "  Preferred if Kerberos CIFS mounts are not used:"
         info "    apt remove cifs-utils   (removes cifs.upcall, fully eliminates exploit path)"
+    else
+        info "  Preferred if Kerberos CIFS mounts are not used:"
+        info "    apt remove cifs-utils   (removes cifs.upcall, fully eliminates exploit path)"
+        if [[ "$USERNS_SYSCTL" == "kernel.unprivileged_userns_clone" ]]; then
+            echo "kernel.unprivileged_userns_clone=0" > /etc/sysctl.d/99-cifswitch.conf
+            sysctl -w kernel.unprivileged_userns_clone=0 >/dev/null 2>&1 || true
+            if [[ "$(cat /proc/sys/kernel/unprivileged_userns_clone 2>/dev/null)" == "0" ]]; then
+                ok "kernel.unprivileged_userns_clone=0 set (persisted to /etc/sysctl.d/99-cifswitch.conf)"
+            else
+                warn "kernel.unprivileged_userns_clone could not be set at runtime (persisted for next boot)"
+            fi
+            info "  Note: some desktop features (browsers, containers) may require userns."
+            info "  If needed, re-enable with: sudo sysctl -w kernel.unprivileged_userns_clone=1"
+        else
+            # user.max_user_namespaces=0 also blocks root (LXC, Docker userns, sandboxes)
+            warn "kernel.unprivileged_userns_clone not available on this kernel"
+            info "  user.max_user_namespaces=0 would block ALL new user namespaces, including root"
+            info "  (containers, sandboxes) – not applied automatically. If acceptable:"
+            info "    sudo sysctl -w user.max_user_namespaces=0"
+        fi
     fi
 fi
 
@@ -1019,6 +1051,6 @@ echo    "  8. CIFSwitch – CIFS/cifs.spnego key forgery (patch + cifs-utils upd
 echo    "       https://heyitsas.im/posts/cifswitch/"
 echo    "       https://github.com/manizada/CIFSwitch"
 echo    "       apt update && apt full-upgrade   (kernel + cifs-utils)"
-echo    "       Mitigation: sudo check-cve --fix  (sets unprivileged_userns_clone=0)"
-echo    "       Safe removal: apt remove cifs-utils  (if Kerberos CIFS mounts unused)"
+echo    "       Preferred: apt remove cifs-utils  (if Kerberos CIFS mounts unused)"
+echo    "       Mitigation: sudo check-cve --fix  (sets unprivileged_userns_clone=0 if cifs-utils is installed)"
 echo -e "${BOLD}============================================================${RESET}\n"
