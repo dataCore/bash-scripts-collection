@@ -554,11 +554,11 @@ EOF
 }
 
 # =============================================================================
-# Step 6 — Harden sshd_config
+# Step 5b — Pre-flight for the hardening
 # =============================================================================
 
-# Password login is switched off below. Without a key sshd accepts, the user
-# (and on a fresh host everybody) would be locked out — so refuse to harden
+# Password login is switched off later. Without a key sshd accepts, the user
+# (and on a fresh host everybody) would be locked out — so refuse to go on
 # unless authorized_keys holds at least one key that ssh-keygen can parse.
 require_valid_key() {
     local auth_keys="${TARGET_HOME}/.ssh/authorized_keys" valid=0
@@ -571,6 +571,10 @@ require_valid_key() {
     ok "${valid} valid key(s) in ${auth_keys} — safe to disable password login"
 }
 
+# =============================================================================
+# Step 6 — Harden sshd_config
+# =============================================================================
+
 step_harden_sshd() {
     print_section "SSH Hardening (sshd_config.d)"
 
@@ -578,8 +582,6 @@ step_harden_sshd() {
     if [[ ! -f "$SSHD_CONFIG" ]]; then
         die "sshd_config not found at ${SSHD_CONFIG} — openssh-server may not be installed correctly.\n  Try manually: apt-get install --reinstall openssh-server"
     fi
-
-    require_valid_key
 
     ok "Backup of this run: ${SSHD_BACKUP_DIR}"
 
@@ -874,12 +876,14 @@ main() {
     step_setup_sudo
     step_setup_git
     step_create_banner
+    # Keys first: hardening switches off password login, so it must never run
+    # before the user has a working key. The check comes before the PVE root
+    # exception and the fail2ban jail, so an abort leaves sshd untouched.
+    step_install_authorized_keys
+    require_valid_key
     step_configure_fail2ban
     backup_sshd_config
     step_pve_root_ssh
-    # Keys first: hardening switches off password login, so it must never run
-    # before the user has a working key (see require_valid_key).
-    step_install_authorized_keys
     step_harden_sshd
     step_summary
 }
