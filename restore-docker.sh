@@ -17,11 +17,19 @@
 # 2026-10-13 PostgreSQL: TimescaleDB restore (version check, pre/post restore,
 #            catalog schemas ignored in the empty check), wait for the init
 #            phase of the image to finish (TCP instead of socket)
+# 2026-10-19 Volume: archive tested and extracted next to the target, the old
+#            dir is kept as .bak-<ts>. Credentials resolved like backup-docker
+#            (MARIADB_ROOT_PASSWORD, *_FILE, MYSQL_PWD, POSTGRES_USER default
+#            postgres). Compose files/project from the container labels.
+#            GitLab: new .gitlabbackup.tar and .gitlabconfig.tar.gz, wait for
+#            healthy, token from the archive. Timeouts configurable.
 #
 # INFO: Run from the docker-compose project directory, e.g.:
 #       cd /etc/docker-compose/datacoreipam/
 # Usage:   restore-docker {BACKUPDIR}
 # Example: restore-docker '/mnt/backup'
+# Env:     RESTORE_TIMEOUT (default 180 s) – wait for a service to be ready
+#          RESTORE_GITLAB_TIMEOUT (default 900 s) – the same for GitLab
 # ============================================================================
 
 # --- ROOT CHECK ---
@@ -41,6 +49,12 @@ set -Eeuo pipefail
 trap 'echo -e "\n❌ Error on line $LINENO. Restore script aborted."' ERR
 
 # --- FUNCTIONS ---
+
+# docker compose for this project. COMPOSE_ARGS holds -p/-f/--project-directory
+# from the container labels when the project exists (set below).
+dc() {
+    docker compose "${COMPOSE_ARGS[@]}" "$@"
+}
 
 # Write a SQL dump to stdout, decompressed by its extension (.sql.zst or .sql.gz).
 decompress() {
@@ -84,7 +98,7 @@ check_import() {
 # stdin is /dev/null so callers can loop over a here-string.
 # Usage: pg_query <database> <sql>
 pg_query() {
-    docker compose exec -T "$SERVICENAME" \
+    dc exec -T "$SERVICENAME" \
         psql -X -v ON_ERROR_STOP=1 -U "$CONTAINERENV_DBUSER" -d "$1" -tAc "$2" </dev/null | tr -d '\r'
 }
 
@@ -101,7 +115,9 @@ backup_type() {
         *.postgredump.sql.gz)    echo "postgres .postgredump.sql.gz" ;;
         *.mongodump.archive.gz)  echo "mongo .mongodump.archive.gz" ;;
         *.mongodump.sql.gz)      echo "mongo .mongodump.sql.gz" ;;   # pre-2026-09 name
-        *.gitlabbackup.tar.gz)   echo "gitlab .gitlabbackup.tar.gz" ;;
+        *.gitlabbackup.tar.gz)   echo "gitlab .gitlabbackup.tar.gz" ;;   # before 2026-10-19
+        *.gitlabbackup.tar)      echo "gitlab .gitlabbackup.tar" ;;
+        *.gitlabconfig.tar.gz)   echo "gitlabconfig .gitlabconfig.tar.gz" ;;
         *.volume.tar.gz)         echo "volume .volume.tar.gz" ;;
     esac
 }
@@ -112,7 +128,7 @@ backup_type() {
 compose_up() {
     local service="$1"
     local output
-    if ! output=$(docker compose up -d "$service" 2>&1); then
+    if ! output=$(dc up -d "$service" 2>&1); then
         echo "❌ Failed to start service '${service}':"
         echo "   ${output//$'\n'/$'\n'   }"
         # Common hint: missing bind-mount source files on the host
@@ -144,7 +160,7 @@ wait_healthy() {
 
     while true; do
         local cid
-        cid=$(docker compose ps -q "$service" 2>/dev/null || true)
+        cid=$(dc ps -q "$service" 2>/dev/null || true)
 
         if [ -n "$cid" ]; then
             # --- Check 1a: Docker healthcheck status ---
@@ -178,13 +194,17 @@ wait_healthy() {
                 local ready=false
                 case "$db_type" in
                     mariadb|mysql)
-                        if docker exec "$cid" sh -c \
-                            'mariadb-admin ping -u root -p"${MYSQL_ROOT_PASSWORD:-$DB_ROOT_PASSWORD}" --silent' \
+                        # shellcheck disable=SC2016  # expanded in the container
+                        if docker exec "$cid" sh -c "${MYSQL_PW_SH}"'
+                            u="${MARIADB_ROOT_USER:-root}"
+                            mariadb-admin ping -u "$u" --silent 2>/dev/null \
+                                || mysqladmin ping -u "$u" --silent' \
                             2>/dev/null; then ready=true; fi
                         ;;
                     postgres)
+                        # shellcheck disable=SC2016
                         if docker exec "$cid" sh -c \
-                            'pg_isready -U "$POSTGRES_USER" --quiet' \
+                            'pg_isready -U "$('"$PG_USER_SH"')" --quiet' \
                             2>/dev/null; then ready=true; fi
                         ;;
                     mongo)
@@ -218,6 +238,31 @@ wait_healthy() {
     done
 }
 
+# --- CREDENTIALS (resolved inside the container, as in backup-docker) ---
+# The root password of MariaDB/MySQL never becomes an argument on the host
+# (visible in ps): the shell in the container looks it up and hands it to the
+# client in MYSQL_PWD. Plain variables first, then the *_FILE variants
+# (Docker secrets). Keep in sync with backup-docker.
+# shellcheck disable=SC2016  # expanded by the shell inside the container
+MYSQL_PW_SH='MYSQL_PWD="${MYSQL_ROOT_PASSWORD:-${MARIADB_ROOT_PASSWORD:-${DB_ROOT_PASSWORD:-}}}"
+for f in "${MARIADB_ROOT_PASSWORD_FILE:-}" "${MYSQL_ROOT_PASSWORD_FILE:-}"; do
+    if [ -z "$MYSQL_PWD" ] && [ -n "$f" ] && [ -r "$f" ]; then MYSQL_PWD=$(cat "$f"); fi
+done
+export MYSQL_PWD
+'
+# Succeeds when a password was found (or the image allows an empty one)
+# shellcheck disable=SC2016
+MYSQL_PW_CHECK='[ -n "$MYSQL_PWD" ] || [ -n "${MARIADB_ALLOW_EMPTY_ROOT_PASSWORD:-}${MYSQL_ALLOW_EMPTY_PASSWORD:-}" ]'
+# PostgreSQL superuser: POSTGRES_USER(_FILE) as the official image, else postgres
+# shellcheck disable=SC2016
+PG_USER_SH='u="${POSTGRES_USER:-}"
+if [ -z "$u" ] && [ -n "${POSTGRES_USER_FILE:-}" ] && [ -r "$POSTGRES_USER_FILE" ]; then u=$(cat "$POSTGRES_USER_FILE"); fi
+echo "${u:-postgres}"'
+
+# GitLab's backup_path, bind-mounted at the same path on the host and in the
+# container (as in backup-docker)
+GITLAB_BACKUP_CACHE="/mnt/backup-cache/gitlab-backup"
+
 # --- VARIABLES ---
 HOSTNAME="$(hostname)"
 # Lower-cased like backup-docker does, otherwise a project dir such as
@@ -225,8 +270,35 @@ HOSTNAME="$(hostname)"
 PROJECTNAME=$(basename "$PWD" | tr '[:upper:]' '[:lower:]')
 BACKUPDIR="${1:-"/mnt/backup"}/${HOSTNAME}/${PROJECTNAME}"
 DOCKERROOTDIR=$(docker info --format '{{ .DockerRootDir }}')
-TIMEOUT=60        # Max wait time in seconds
+TIMEOUT="${RESTORE_TIMEOUT:-180}"                # Max wait time in seconds
+GITLAB_TIMEOUT="${RESTORE_GITLAB_TIMEOUT:-900}"  # GitLab needs minutes to boot
 WAIT_INTERVAL=2   # Poll interval in seconds
+
+# Address the project the way it was started: a compose file with another
+# name than the default, or several -f files, is otherwise not found. Only
+# when containers of this project exist (running or stopped) – without them
+# a -p from the directory name could start a second project next to one
+# that sets 'name:' in its compose file; plain 'docker compose' is used then.
+COMPOSE_ARGS=()
+PROJECT_CID=$(docker ps -aq --filter "label=com.docker.compose.project=${PROJECTNAME}" | head -n 1)
+if [ -n "$PROJECT_CID" ]; then
+    COMPOSE_ARGS=(-p "$PROJECTNAME")
+    COMPOSE_WORKDIR=$(docker inspect --format '{{ index .Config.Labels "com.docker.compose.project.working_dir" }}' "$PROJECT_CID")
+    COMPOSE_FILES=$(docker inspect --format '{{ index .Config.Labels "com.docker.compose.project.config_files" }}' "$PROJECT_CID")
+    if [ -n "$COMPOSE_WORKDIR" ] && [ -d "$COMPOSE_WORKDIR" ]; then
+        COMPOSE_ARGS+=(--project-directory "$COMPOSE_WORKDIR")
+    fi
+    FILE_ARGS=()
+    IFS=',' read -r -a CONFIG_FILES <<< "$COMPOSE_FILES"
+    for f in "${CONFIG_FILES[@]}"; do
+        if [ ! -f "$f" ]; then
+            FILE_ARGS=()
+            break
+        fi
+        FILE_ARGS+=(-f "$f")
+    done
+    COMPOSE_ARGS+=("${FILE_ARGS[@]}")
+fi
 
 # =======================================================================
 echo "===============> RESTORE 📦 DOCKER SCRIPT"
@@ -258,7 +330,7 @@ for file in "$BACKUPDIR"/*"$PROJECTNAME"*; do
         mysql)    MYSQLS+=("$filename") ;;
         postgres) POSTGRES+=("$filename") ;;
         mongo)    MONGOS+=("$filename") ;;
-        gitlab)   GITLABS+=("$filename") ;;
+        gitlab|gitlabconfig) GITLABS+=("$filename") ;;
         volume)   VOLUMES+=("$filename") ;;
     esac
 done
@@ -334,7 +406,7 @@ if [[ "$TYPE" != compose && "$TYPE" != volume ]]; then
             --format '{{.Label "com.docker.compose.service"}}' 2>/dev/null | head -n1 || true)
 
         if [ -z "$SERVICENAME" ]; then
-            SERVICENAME=$(docker compose config 2>/dev/null | awk -v cn="$CONTAINERNAME" '
+            SERVICENAME=$(dc config 2>/dev/null | awk -v cn="$CONTAINERNAME" '
                 /^services:/ { in_svc=1; next }
                 in_svc && /^  [a-zA-Z]/ { cur=$1; gsub(/:$/,"",cur) }
                 in_svc && /container_name:/ { gsub(/[[:space:]]/,"",$2); if ($2==cn) { print cur; exit } }
@@ -362,44 +434,32 @@ if [ "$TYPE" == compose ]; then
     echo "✅ Compose config restored to $PWD"
 
 # =======================================================================
-# RESTORE MariaDB
-elif [ "$TYPE" == mariadb ]; then
-    echo "🐬 Restoring MariaDB..."
+# RESTORE MariaDB / MySQL
+elif [ "$TYPE" == mariadb ] || [ "$TYPE" == mysql ]; then
+    if [ "$TYPE" == mariadb ]; then DBLABEL="MariaDB"; DBCLIENT=mariadb; else DBLABEL="MySQL"; DBCLIENT=mysql; fi
+    echo "🐬 Restoring ${DBLABEL}..."
     compose_up "$SERVICENAME"
-    wait_healthy "$SERVICENAME" mariadb
-    # Verify root password is available inside the container.
-    # Supports MYSQL_ROOT_PASSWORD (standard) and DB_ROOT_PASSWORD (some stacks).
-    ROOTPW_CHECK=$(docker compose exec "$SERVICENAME" \
-        sh -c 'echo "${MYSQL_ROOT_PASSWORD:-${DB_ROOT_PASSWORD:-}}"' 2>/dev/null | tr -d '\r\n')
-    if [ -z "$ROOTPW_CHECK" ]; then
-        echo "❌ Neither MYSQL_ROOT_PASSWORD nor DB_ROOT_PASSWORD is set in container '${SERVICENAME}'."
-        echo "   Check the env_file / environment: section in your docker-compose.yml."
+    wait_healthy "$SERVICENAME" "$TYPE"
+    # Verify the root password is available inside the container: MYSQL_ROOT_PASSWORD,
+    # MARIADB_ROOT_PASSWORD, DB_ROOT_PASSWORD (some stacks) or a *_FILE variant.
+    if ! dc exec -T "$SERVICENAME" sh -c "${MYSQL_PW_SH}${MYSQL_PW_CHECK}" </dev/null; then
+        echo "❌ No root password in container '${SERVICENAME}' (MYSQL_ROOT_PASSWORD, MARIADB_ROOT_PASSWORD,"
+        echo "   DB_ROOT_PASSWORD or *_FILE). Check the env_file / environment: section in your docker-compose.yml."
         exit 1
     fi
     IMPORT_RC=0
-    IMPORT_STDERR=$( { decompress "$SELECTED" | docker compose exec -T "$SERVICENAME" \
-        sh -c 'mariadb -u root -p"${MYSQL_ROOT_PASSWORD:-$DB_ROOT_PASSWORD}"'; } 2>&1 ) || IMPORT_RC=$?
-    check_import "MariaDB" "$IMPORT_RC" "$IMPORT_STDERR" '^ERROR'
-    echo "✅ MariaDB restored"
-
-# =======================================================================
-# RESTORE MySQL
-elif [ "$TYPE" == mysql ]; then
-    echo "🐬 Restoring MySQL..."
-    compose_up "$SERVICENAME"
-    wait_healthy "$SERVICENAME" mysql
-    ROOTPW_CHECK=$(docker compose exec "$SERVICENAME" \
-        sh -c 'echo "${MYSQL_ROOT_PASSWORD:-${DB_ROOT_PASSWORD:-}}"' 2>/dev/null | tr -d '\r\n')
-    if [ -z "$ROOTPW_CHECK" ]; then
-        echo "❌ Neither MYSQL_ROOT_PASSWORD nor DB_ROOT_PASSWORD is set in container '${SERVICENAME}'."
-        echo "   Check the env_file / environment: section in your docker-compose.yml."
-        exit 1
-    fi
-    IMPORT_RC=0
-    IMPORT_STDERR=$( { decompress "$SELECTED" | docker compose exec -T "$SERVICENAME" \
-        sh -c 'mysql -u root -p"${MYSQL_ROOT_PASSWORD:-$DB_ROOT_PASSWORD}"'; } 2>&1 ) || IMPORT_RC=$?
-    check_import "MySQL" "$IMPORT_RC" "$IMPORT_STDERR" '^ERROR'
-    echo "✅ MySQL restored"
+    # shellcheck disable=SC2016  # expanded in the container
+    IMPORT_STDERR=$( { decompress "$SELECTED" | dc exec -T "$SERVICENAME" \
+        sh -c "${MYSQL_PW_SH}"'
+            for tool in "$0" mariadb mysql; do
+                if command -v "$tool" >/dev/null 2>&1; then
+                    exec "$tool" -u "${MARIADB_ROOT_USER:-root}"
+                fi
+            done
+            echo "ERROR: no mariadb/mysql client in the container" >&2
+            exit 127' "$DBCLIENT"; } 2>&1 ) || IMPORT_RC=$?
+    check_import "$DBLABEL" "$IMPORT_RC" "$IMPORT_STDERR" '^ERROR'
+    echo "✅ ${DBLABEL} restored"
 
 # =======================================================================
 # RESTORE PostgreSQL
@@ -407,10 +467,11 @@ elif [ "$TYPE" == postgres ]; then
     echo "🐘 Restoring PostgreSQL..."
     compose_up "$SERVICENAME"
     wait_healthy "$SERVICENAME" postgres
-    CONTAINERENV_DBNAME=$(docker compose exec -T "$SERVICENAME" sh -c 'echo "${POSTGRES_DB:-}"' | tr -d '\r\n')
-    CONTAINERENV_DBUSER=$(docker compose exec -T "$SERVICENAME" sh -c 'echo "${POSTGRES_USER:-}"' | tr -d '\r\n')
+    # shellcheck disable=SC2016
+    CONTAINERENV_DBNAME=$(dc exec -T "$SERVICENAME" sh -c 'echo "${POSTGRES_DB:-}"' | tr -d '\r\n')
+    CONTAINERENV_DBUSER=$(dc exec -T "$SERVICENAME" sh -c "$PG_USER_SH" </dev/null | tr -d '\r\n')
     if [ -z "$CONTAINERENV_DBUSER" ]; then
-        echo "❌ POSTGRES_USER is not set in container '${CONTAINERNAME}'."
+        echo "❌ Could not determine the PostgreSQL user in container '${CONTAINERNAME}'."
         exit 1
     fi
     DBNAME="${CONTAINERENV_DBNAME:-postgres}"
@@ -419,7 +480,7 @@ elif [ "$TYPE" == postgres ]; then
     # (listen_addresses=''), and a socket healthcheck already passes then. The
     # init scripts (TimescaleDB: CREATE EXTENSION) must be done, so wait for TCP.
     elapsed=0
-    until docker compose exec -T "$SERVICENAME" \
+    until dc exec -T "$SERVICENAME" \
         pg_isready -q -h 127.0.0.1 -U "$CONTAINERENV_DBUSER" >/dev/null 2>&1; do
         if [ "$elapsed" -ge "$TIMEOUT" ]; then
             echo "❌ Timeout after ${TIMEOUT}s: PostgreSQL in '${SERVICENAME}' does not answer on TCP."
@@ -453,7 +514,7 @@ elif [ "$TYPE" == postgres ]; then
     # The dump switches databases itself (\connect), and apps often use a DB
     # other than POSTGRES_DB, so every database is checked. Fail closed: if a
     # check does not return a number, the instance is treated as not empty.
-    if ! PG_DATABASES=$(docker compose exec -T "$SERVICENAME" \
+    if ! PG_DATABASES=$(dc exec -T "$SERVICENAME" \
         psql -U "$CONTAINERENV_DBUSER" -d "$DBNAME" -tAc \
         "SELECT datname FROM pg_database WHERE NOT datistemplate" \
         | tr -d '\r'); then
@@ -468,7 +529,7 @@ elif [ "$TYPE" == postgres ]; then
     USERTABLES=0
     PG_TABLECOUNTS=()
     for db in "${PG_DBLIST[@]}"; do
-        if ! COUNT=$(docker compose exec -T "$SERVICENAME" \
+        if ! COUNT=$(dc exec -T "$SERVICENAME" \
             psql -U "$CONTAINERENV_DBUSER" -d "$db" -tAc \
             "SELECT count(*) FROM pg_catalog.pg_tables WHERE schemaname NOT IN ('pg_catalog','information_schema') AND schemaname !~ '^_?timescaledb'" \
             | tr -d '\r\n'); then
@@ -537,7 +598,7 @@ elif [ "$TYPE" == postgres ]; then
     # Expected on a fresh instance: 'role ... already exists' and
     # 'database ... already exists' for the user/DB the image created at init.
     IMPORT_RC=0
-    IMPORT_STDERR=$( { decompress "$SELECTED" | docker compose exec -T "$SERVICENAME" \
+    IMPORT_STDERR=$( { decompress "$SELECTED" | dc exec -T "$SERVICENAME" \
         psql -q -U "$CONTAINERENV_DBUSER" -d "$DBNAME" >/dev/null; } 2>&1 ) || IMPORT_RC=$?
     # Leave restoring mode even if the import failed, then judge the import.
     while read -r db _; do
@@ -561,7 +622,8 @@ elif [ "$TYPE" == mongo ]; then
     # mongorestore exits 0 even when single documents fail (e.g. duplicate key);
     # it only logs them, so its log decides.
     IMPORT_RC=0
-    IMPORT_STDERR=$( { gunzip -c "$SELECTED" | docker compose exec -T "$SERVICENAME" \
+    # shellcheck disable=SC2016  # expanded in the container
+    IMPORT_STDERR=$( { gunzip -c "$SELECTED" | dc exec -T "$SERVICENAME" \
         sh -c 'set --
             if [ -n "${MONGO_INITDB_ROOT_USERNAME:-}" ]; then
                 set -- --authenticationDatabase admin \
@@ -577,39 +639,71 @@ elif [ "$TYPE" == mongo ]; then
 # RESTORE GitLab
 elif [ "$TYPE" == gitlab ]; then
     echo "🦊 Restoring GitLab..."
-    compose_up "$SERVICENAME"
-
-    # Unpack backup archive into the GitLab backup mount
-    GITLAB_BACKUP_HOST="/mnt/backup-cache/gitlab-backup"
-    mkdir -p "$GITLAB_BACKUP_HOST"
-    tar -xzf "$SELECTED" -C "$GITLAB_BACKUP_HOST"
-
-    # The extracted file must be owned by 'git' inside the container
-    docker compose exec "$SERVICENAME" bash -c \
-        "chown git /mnt/backup-cache/gitlab-backup && chmod 700 /mnt/backup-cache/gitlab-backup"
-
-    # Stop application services before restore
-    docker compose exec "$SERVICENAME" bash -c \
-        "gitlab-ctl stop puma && gitlab-ctl stop sidekiq && gitlab-ctl status"
-
-    # Determine the backup timestamp token from the archive filename
-    # GitLab restore expects the token part (everything before _gitlab_backup.tar)
-    # backup-docker tars the whole backup dir, so it can hold several backups.
-    # Tokens start with the epoch: the last one in sort order is the newest.
-    BACKUP_TOKEN=$(find "${GITLAB_BACKUP_HOST}" -maxdepth 1 -name '*_gitlab_backup.tar' -printf '%f\n' 2>/dev/null | sort | tail -n 1)
-    BACKUP_TOKEN=${BACKUP_TOKEN%_gitlab_backup.tar}
-    if [ -z "$BACKUP_TOKEN" ]; then
-        echo "❌ Could not find a gitlab_backup.tar file in ${GITLAB_BACKUP_HOST}"
+    # Test the archive and take the backup token from it (everything before
+    # _gitlab_backup.tar): old .tar.gz files hold the whole cache dir and may
+    # carry several backups – tokens start with the epoch, the last one is the
+    # newest. Reading it from the archive, not the cache dir, ignores leftovers.
+    if ! GITLAB_MEMBERS=$(tar -tf "$SELECTED"); then
+        echo "❌ Archive is damaged or unreadable: $SELECTED"
         exit 1
     fi
+    GITLAB_MEMBER=$(grep '_gitlab_backup\.tar$' <<< "$GITLAB_MEMBERS" | sort | tail -n 1 || true)
+    BACKUP_TOKEN=$(basename "$GITLAB_MEMBER" _gitlab_backup.tar)
+    if [ -z "$GITLAB_MEMBER" ] || [ -z "$BACKUP_TOKEN" ]; then
+        echo "❌ No *_gitlab_backup.tar in $(basename "$SELECTED")."
+        exit 1
+    fi
+    echo "  Backup token: ${BACKUP_TOKEN}"
+    echo "ℹ️  The restore needs the gitlab-secrets.json of the backed-up instance:"
+    echo "   restore the matching .gitlabconfig.tar.gz first (then gitlab-ctl reconfigure)."
 
-    docker compose exec "$SERVICENAME" bash -c \
+    compose_up "$SERVICENAME"
+    # GitLab takes minutes until its services are up; chown and gitlab-ctl
+    # fail or hang before that.
+    TIMEOUT="$GITLAB_TIMEOUT" wait_healthy "$SERVICENAME"
+
+    # Unpack the backup into the GitLab backup mount
+    mkdir -p "$GITLAB_BACKUP_CACHE"
+    tar -xf "$SELECTED" -C "$GITLAB_BACKUP_CACHE" "$GITLAB_MEMBER"
+    GITLAB_FILE="${BACKUP_TOKEN}_gitlab_backup.tar"
+
+    # The extracted file must be owned by 'git' inside the container
+    dc exec -T "$SERVICENAME" bash -c \
+        "chown git '${GITLAB_BACKUP_CACHE}' '${GITLAB_BACKUP_CACHE}/${GITLAB_FILE}' && chmod 700 '${GITLAB_BACKUP_CACHE}'"
+
+    # Stop application services before restore
+    dc exec -T "$SERVICENAME" bash -c \
+        "gitlab-ctl stop puma && gitlab-ctl stop sidekiq && gitlab-ctl status"
+
+    dc exec -T "$SERVICENAME" bash -c \
         "gitlab-backup restore BACKUP=${BACKUP_TOKEN} force=yes"
-    docker compose exec "$SERVICENAME" bash -c \
+    rm -f "${GITLAB_BACKUP_CACHE:?}/${GITLAB_FILE}"
+    dc exec -T "$SERVICENAME" bash -c \
         "gitlab-ctl restart && gitlab-rake gitlab:check SANITIZE=true && gitlab-rake gitlab:doctor:secrets"
-    docker compose exec "$SERVICENAME" bash -c \
+    dc exec -T "$SERVICENAME" bash -c \
         "gitlab-rake gitlab:artifacts:check && gitlab-rake gitlab:lfs:check && gitlab-rake gitlab:uploads:check"
     echo "✅ GitLab restored"
+
+# =======================================================================
+# RESTORE GitLab config (gitlab.rb, gitlab-secrets.json)
+elif [ "$TYPE" == gitlabconfig ]; then
+    echo "🦊 Restoring GitLab config (gitlab.rb, gitlab-secrets.json)..."
+    if ! tar -tzf "$SELECTED" >/dev/null; then
+        echo "❌ Archive is damaged or unreadable: $SELECTED"
+        exit 1
+    fi
+    compose_up "$SERVICENAME"
+    RESTORE_TS=$(date +%Y%m%d_%H%M%S)
+    # The current files are kept as <file>.bak-<ts> in /etc/gitlab
+    # shellcheck disable=SC2016  # expanded in the container
+    dc exec -T "$SERVICENAME" sh -c '
+        cd /etc/gitlab || exit 1
+        for f in gitlab.rb gitlab-secrets.json; do
+            if [ -f "$f" ]; then cp -a "$f" "$f.bak-$0" || exit 1; fi
+        done
+        exec tar -xzf - -C /etc/gitlab' "$RESTORE_TS" < "$SELECTED"
+    echo "✅ GitLab config restored to /etc/gitlab (previous files: *.bak-${RESTORE_TS})"
+    echo "   Apply it: docker compose exec ${SERVICENAME} gitlab-ctl reconfigure"
 
 # =======================================================================
 # RESTORE Volume
@@ -627,20 +721,42 @@ elif [ "$TYPE" == volume ]; then
         echo "   Stop them first (docker compose stop <service>)."
         exit 1
     fi
+    # Nothing is touched before the archive has been read completely: test it,
+    # extract it next to the target, and only then swap the directories. The
+    # current content is kept, not deleted.
+    echo "  Testing archive..."
+    if ! tar -tzf "$SELECTED" >/dev/null; then
+        echo "❌ Archive is damaged or unreadable: $SELECTED"
+        exit 1
+    fi
     TARGETDIR="${DOCKERROOTDIR}/volumes/${OBJNAME}"
+    RESTORE_TS=$(date +%Y%m%d_%H%M%S)
+    STAGINGDIR="${TARGETDIR}.restore-${RESTORE_TS}"
+    OLDDIR=""
     if [ -d "$TARGETDIR" ]; then
-        read -r -p "⚠️  Folder '$TARGETDIR' already exists. Delete it first? (y/n): " CONFIRM
-        if [[ "$CONFIRM" == "y" || "$CONFIRM" == "Y" ]]; then
-            rm -rf "$TARGETDIR"
-            echo "  Folder deleted."
-        else
+        OLDDIR="${TARGETDIR}.bak-${RESTORE_TS}"
+        read -r -p "⚠️  Folder '$TARGETDIR' already exists. Replace it (the current one is kept as '${OLDDIR}')? (y/n): " CONFIRM
+        if [[ "$CONFIRM" != "y" && "$CONFIRM" != "Y" ]]; then
             echo "❌ Restore cancelled."
             exit 1
         fi
     fi
-    mkdir -p "$TARGETDIR"
-    tar -xzf "$SELECTED" -C "$TARGETDIR"
+    mkdir -p "$STAGINGDIR"
+    if ! tar -xzf "$SELECTED" -C "$STAGINGDIR"; then
+        rm -rf "$STAGINGDIR"
+        echo "❌ Extracting failed, '${TARGETDIR}' is unchanged."
+        exit 1
+    fi
+    if [ -n "$OLDDIR" ]; then
+        mv "$TARGETDIR" "$OLDDIR"
+    fi
+    mv "$STAGINGDIR" "$TARGETDIR"
     echo "✅ Volume restored to $TARGETDIR"
+    if [ -n "$OLDDIR" ]; then
+        echo "ℹ️  The previous content is in '${OLDDIR}'. Docker may list it as a volume"
+        echo "   after a daemon restart. Remove it once the restore is verified:"
+        echo "     rm -rf $(printf '%q' "$OLDDIR")"
+    fi
 
 else
     echo "❌ Unknown backup type: $(basename "$SELECTED")"
