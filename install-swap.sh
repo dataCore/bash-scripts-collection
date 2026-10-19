@@ -151,8 +151,12 @@ parse_size() {
 parse_args() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --size)        OPT_SIZE="${2:-}"; shift 2 ;;
-            --swappiness)  OPT_SWAPPINESS="${2:-}"; shift 2 ;;
+            --size)
+                [[ $# -ge 2 && -n "$2" ]] || die "--size requires a value (e.g. 8G, 4096M)"
+                OPT_SIZE="$2"; shift 2 ;;
+            --swappiness)
+                [[ $# -ge 2 && -n "$2" ]] || die "--swappiness requires a value (0-200)"
+                OPT_SWAPPINESS="$2"; shift 2 ;;
             --remove-old)  OPT_REMOVE_OLD=true; shift ;;
             --fix-resume)  OPT_FIX_RESUME=true; shift ;;
             --dry-run)     OPT_DRY_RUN=true; shift ;;
