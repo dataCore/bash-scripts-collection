@@ -2,16 +2,36 @@
 REPO="/usr/bin/datacore/bash"
 BRANCH="main"
 
-if git -C "$REPO" pull; then
-    echo "git pull succeeded."
-else
-    echo "WARNING: git pull failed. Local changes will be discarded."
-    if git -C "$REPO" fetch --all && git -C "$REPO" reset --hard "origin/$BRANCH"; then
-        echo "Repository has been hard reset to origin/$BRANCH."
+# Fetch only; no pull, so a diverged local branch never ends in a merge
+if ! timeout 120 git -C "$REPO" fetch origin "$BRANCH"; then
+    echo "ERROR: git fetch origin $BRANCH failed or timed out. Repository left unchanged."
+    exit 1
+fi
+
+# Opt-in signature check: once gpg.ssh.allowedSignersFile is configured
+# (repository or system git config), only a signed commit from a listed key
+# is accepted.
+if [ -n "$(git -C "$REPO" config --get gpg.ssh.allowedSignersFile)" ]; then
+    if git -C "$REPO" verify-commit "origin/$BRANCH"; then
+        echo "Signature of origin/$BRANCH verified."
     else
-        echo "ERROR: fetch/reset failed."
+        echo "ERROR: signature of origin/$BRANCH could not be verified. Repository left unchanged."
         exit 1
     fi
+fi
+
+# Same semantics as before: local changes are discarded, but say so only
+# when there are any (modified tracked files or local commits).
+if [ -n "$(git -C "$REPO" status --porcelain --untracked-files=no)" ] ||
+    [ -n "$(git -C "$REPO" rev-list "origin/$BRANCH..HEAD")" ]; then
+    echo "WARNING: local changes in $REPO are discarded."
+fi
+
+if git -C "$REPO" reset --hard "origin/$BRANCH"; then
+    echo "Repository is at origin/$BRANCH."
+else
+    echo "ERROR: git reset --hard origin/$BRANCH failed."
+    exit 1
 fi
 
 # Execute link.sh if available
