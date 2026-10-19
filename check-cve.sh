@@ -79,6 +79,14 @@ json_escape() {
     printf '%s' "$s" | tr -d '\000-\037'
 }
 
+# Loaded kernel modules, read once from /proc/modules. Matching against a
+# variable avoids `lsmod | grep -q`, which under pipefail reports a match as
+# failure when grep exits early and lsmod dies of SIGPIPE.
+PROC_MODULES=""
+refresh_modules() { PROC_MODULES=$(cat /proc/modules 2>/dev/null || true); }
+module_loaded() { grep -q "^$1 " <<< "$PROC_MODULES"; }
+refresh_modules
+
 # Collect JSON results
 declare -A JSON_FIELDS
 
@@ -105,7 +113,7 @@ fi
 COPYFAIL_STATUS="ok"
 
 # 1a. Module loaded right now?
-if lsmod 2>/dev/null | grep -q "^algif_aead"; then
+if module_loaded algif_aead; then
     warn "algif_aead is currently LOADED – attack surface active"
     COPYFAIL_STATUS="vulnerable"
 else
@@ -134,7 +142,7 @@ else
 fi
 
 # 1c. modprobe.d mitigation set?
-if grep -rl "algif_aead" /etc/modprobe.d/ 2>/dev/null | grep -q .; then
+if grep -rqs "algif_aead" /etc/modprobe.d/; then
     ok "modprobe.d mitigation for algif_aead is in place"
     COPYFAIL_STATUS="${COPYFAIL_STATUS}_mitigated"
 else
@@ -142,7 +150,13 @@ else
 fi
 
 # 1d. AF_ALG sockets in use?
-if command -v lsof &>/dev/null && lsof 2>/dev/null | grep -q "AF_ALG"; then
+#     Count instead of `grep -q`: an early grep exit would SIGPIPE lsof and
+#     turn a match into a pipefail failure. Non-root only sees own processes.
+AFALG_COUNT=0
+if command -v lsof &>/dev/null; then
+    AFALG_COUNT=$(lsof 2>/dev/null | grep -c "AF_ALG" || true)
+fi
+if [[ "${AFALG_COUNT:-0}" -gt 0 ]]; then
     warn "AF_ALG sockets are active – check which processes are using them:"
     info "  → lsof | grep AF_ALG"
 else
@@ -158,7 +172,7 @@ DIRTYFRAG_STATUS="ok"
 LOADED_MODS=()
 
 for mod in esp4 esp6 rxrpc; do
-    if lsmod 2>/dev/null | grep -q "^${mod}[[:space:]]"; then
+    if module_loaded "$mod"; then
         warn "${mod} is loaded – Dirty Frag attack surface active"
         LOADED_MODS+=("$mod")
         DIRTYFRAG_STATUS="vulnerable"
@@ -215,7 +229,7 @@ fi
 # 3b. Check if any of the three modules are still loaded despite mitigation
 FRAGNESIA_LOADED=()
 for mod in esp4 esp6 rxrpc; do
-    if lsmod 2>/dev/null | grep -q "^${mod}[[:space:]]"; then
+    if module_loaded "$mod"; then
         warn "${mod} is loaded – Fragnesia attack surface active!"
         FRAGNESIA_LOADED+=("$mod")
         FRAGNESIA_STATUS="vulnerable"
@@ -445,7 +459,7 @@ CIFSWITCH_STATUS="ok"
 
 # 6a. Is cifs.ko loaded?
 CIFS_LOADED=false
-if lsmod 2>/dev/null | grep -q "^cifs[[:space:]]"; then
+if module_loaded cifs; then
     warn "cifs module is LOADED – kernel attack surface present"
     CIFS_LOADED=true
     CIFSWITCH_STATUS="cifs_loaded"
