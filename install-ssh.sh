@@ -18,8 +18,9 @@
 #   5. Set git credential.helper=store for <username>
 #   6. Pre-auth warning banner; figlet hostname + OS/IP as MOTD on login
 #   7. Configure fail2ban for SSH (5 attempts → bantime)
-#   8. Harden sshd_config (AllowGroups, key-only, no root, etc.)
-#   9. Install pubkeys/<username>.pub as authorized_keys for <username>
+#   8. Install pubkeys/<username>.pub as authorized_keys for <username>
+#   9. Harden sshd_config (AllowGroups, key-only, no root, etc.) — only once
+#      authorized_keys holds at least one valid key, so nobody is locked out
 #  10. On a Proxmox VE cluster node: keep root SSH (key only) from the other
 #      cluster nodes and nowhere else — PVE needs it for migration,
 #      replication and pvesh calls to another node
@@ -497,8 +498,22 @@ EOF
 }
 
 # =============================================================================
-# Step 5 — Harden sshd_config
+# Step 6 — Harden sshd_config
 # =============================================================================
+
+# Password login is switched off below. Without a key sshd accepts, the user
+# (and on a fresh host everybody) would be locked out — so refuse to harden
+# unless authorized_keys holds at least one key that ssh-keygen can parse.
+require_valid_key() {
+    local auth_keys="${TARGET_HOME}/.ssh/authorized_keys" valid=0
+    if [[ -s "$auth_keys" ]]; then
+        valid=$(ssh-keygen -lf "$auth_keys" 2>/dev/null | wc -l || true)
+    fi
+    if (( valid < 1 )); then
+        die "No valid public key in ${auth_keys} — sshd hardening skipped to avoid a lockout.\n  Check ${PUBKEY_FILE} (ssh-keygen -lf ${PUBKEY_FILE}) and re-run."
+    fi
+    ok "${valid} valid key(s) in ${auth_keys} — safe to disable password login"
+}
 
 step_harden_sshd() {
     print_section "SSH Hardening (sshd_config.d)"
@@ -507,6 +522,8 @@ step_harden_sshd() {
     if [[ ! -f "$SSHD_CONFIG" ]]; then
         die "sshd_config not found at ${SSHD_CONFIG} — openssh-server may not be installed correctly.\n  Try manually: apt-get install --reinstall openssh-server"
     fi
+
+    require_valid_key
 
     # Backup main config
     if [[ ! -f "${SSHD_CONFIG}.bak" ]]; then
@@ -616,7 +633,7 @@ EOF
 }
 
 # =============================================================================
-# Step 6 — Install authorized_keys
+# Step 5 — Install authorized_keys
 # =============================================================================
 
 step_install_authorized_keys() {
@@ -729,8 +746,10 @@ main() {
     step_create_banner
     step_configure_fail2ban
     step_pve_root_ssh
-    step_harden_sshd
+    # Keys first: hardening switches off password login, so it must never run
+    # before the user has a working key (see require_valid_key).
     step_install_authorized_keys
+    step_harden_sshd
     step_summary
 }
 
