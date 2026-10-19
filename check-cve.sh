@@ -240,10 +240,20 @@ if [[ ${#FRAGNESIA_LOADED[@]} -eq 0 ]]; then
 fi
 
 # 3c. ESP-in-TCP ULP activity (Fragnesia-specific trigger path)
-if command -v ss &>/dev/null && ss --tcp --no-header 2>/dev/null | grep -qi "espintcp"; then
-    warn "espintcp ULP sockets are active – direct Fragnesia trigger path detected!"
-    info "  → ss -tnp | grep espintcp"
+#     Best-effort: the plain socket list never shows the ULP. With -i, ss
+#     prints the ULP name as 'tcp-ulp-<name>' (format string present in
+#     iproute2 ss), but the kernel only reports ULP info to CAP_NET_ADMIN,
+#     so as non-root this check cannot see espintcp sockets at all.
+ESPINTCP_COUNT=0
+if command -v ss &>/dev/null; then
+    ESPINTCP_COUNT=$(ss -tni 2>/dev/null | grep -c "tcp-ulp-espintcp" || true)
+fi
+if [[ "${ESPINTCP_COUNT:-0}" -gt 0 ]]; then
+    warn "espintcp ULP sockets are active (${ESPINTCP_COUNT}) – direct Fragnesia trigger path detected!"
+    info "  → ss -tnip | grep -B1 tcp-ulp-espintcp"
     FRAGNESIA_STATUS="vulnerable_active"
+elif [[ "$(id -u)" -ne 0 ]]; then
+    miss "espintcp ULP sockets not checked – ULP info requires root"
 else
     ok "No active espintcp ULP sockets"
 fi
