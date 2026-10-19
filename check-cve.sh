@@ -350,7 +350,12 @@ fi
 if [[ "$CRACKARMOR_APPARMOR" == "active" ]]; then
 
     # 4c. Check if the AppArmor policy interfaces are writable by unprivileged users
-    #     On a patched kernel the permissions on .load/.replace/.remove are restricted.
+    #     HEURISTIC, unverified: the Qualys advisory shows these files as 0666
+    #     on vulnerable kernels, with the policy-admin check done against the
+    #     writing task. Whether the fix (patch 08/11, "apparmor: fix
+    #     unprivileged local user can do privileged policy management")
+    #     changes the mode or only the credential check is not documented
+    #     there – a patched kernel may still show 0666 (false positive).
     AA_FS="/sys/kernel/security/apparmor"
     for iface in .load .replace .remove; do
         if [[ -e "${AA_FS}/${iface}" ]]; then
@@ -359,10 +364,10 @@ if [[ "$CRACKARMOR_APPARMOR" == "active" ]]; then
                 miss "  ${AA_FS}/${iface}: cannot read permissions"
             elif (( 8#$perms & 8#022 )); then
                 # world-writable or group-writable bit set (owner bits ignored)
-                warn "  ${AA_FS}/${iface}: permissions ${perms} – world/group-writable (unpatched kernel)"
+                warn "  ${AA_FS}/${iface}: permissions ${perms} – world/group-writable (heuristic: matches unpatched kernels, may also appear on patched ones)"
                 CRACKARMOR_STATUS="vulnerable"
             else
-                ok "  ${AA_FS}/${iface}: permissions ${perms} (write-restricted)"
+                ok "  ${AA_FS}/${iface}: permissions ${perms} (write-restricted, heuristic)"
             fi
         fi
     done
