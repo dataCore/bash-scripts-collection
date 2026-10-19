@@ -216,10 +216,12 @@ function Get-Credentials {
     # the only part of the API reachable from every network. Writes nothing,
     # bad credentials -> 401. Catches a typo before the service is restarted.
     Write-Info "Verifying credentials against https://$O2Host ..."
-    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    # Add TLS 1.2 to what .NET offers (PowerShell 5.1 may default to TLS 1.0),
+    # without taking TLS 1.3 away where the OS supports it
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
     $auth = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes("${User}:${Pass}"))
     try {
-        $r = Invoke-WebRequest -UseBasicParsing -Method Post `
+        $r = Invoke-WebRequest -UseBasicParsing -Method Post -TimeoutSec 30 `
              -Uri "https://$O2Host/api/$Org/windows_events/_json" `
              -Headers @{ Authorization = "Basic $auth" } -ContentType 'application/json' -Body '[]'
         $status = [int]$r.StatusCode
