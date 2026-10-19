@@ -45,9 +45,13 @@ REQUIRED_PACKAGES=(
 SSH_GROUP="ssh-users"
 SSH_PORT=22
 SSHD_CONFIG="/etc/ssh/sshd_config"
-SSHD_HARDENED_DROP="/etc/ssh/sshd_config.d/99-datacore-hardened.conf"
-# Sorts after the hardened drop-in, so its Match block follows the global
-# settings. Only written on Proxmox VE cluster nodes.
+# sshd keeps the first value it reads for a keyword, so the hardened drop-in
+# has to sort before every other drop-in (e.g. 50-cloud-init.conf).
+SSHD_HARDENED_DROP="/etc/ssh/sshd_config.d/00-datacore-hardened.conf"
+# Name used by earlier versions; removed on re-run.
+SSHD_HARDENED_DROP_OLD="/etc/ssh/sshd_config.d/99-datacore-hardened.conf"
+# Sorts after the hardened drop-in (and after other drop-ins), so its Match
+# block follows the global settings. Only written on Proxmox VE cluster nodes.
 SSHD_PVE_DROP="/etc/ssh/sshd_config.d/99-pve-cluster.conf"
 PVE_COROSYNC_CONF="/etc/pve/corosync.conf"
 PVE_NODE_ADDRS=()   # filled by detect_pve_cluster
@@ -58,6 +62,9 @@ FAIL2BAN_BANTIME="10m"   # overridden by --bantime parameter
 LOG_FILE="/var/log/datacore-install.log"
 TIMEZONE="Europe/Zurich"
 SUDOERS_DIR="/etc/sudoers.d"
+SSHD_INCLUDE_LINE="Include /etc/ssh/sshd_config.d/*.conf"
+SSHD_BACKUP_ROOT="/etc/ssh/install-ssh-backup"
+SSHD_BACKUP_DIR=""  # set by backup_sshd_config, one directory per run
 
 # Resolve symlinks so pubkeys/ is found relative to the real script location,
 # not the symlink created by link.sh (e.g. /usr/bin/install-ssh → real path)
@@ -462,6 +469,46 @@ EOF
 }
 
 # =============================================================================
+# sshd config backup / rollback
+# =============================================================================
+# One timestamped directory per run, taken before anything under /etc/ssh is
+# written, so a failed `sshd -t` restores exactly the state this run started
+# from — not some older backup, and without deleting drop-ins that were valid.
+
+SSHD_MANAGED_FILES=("$SSHD_CONFIG" "$SSHD_HARDENED_DROP" "$SSHD_HARDENED_DROP_OLD" "$SSHD_PVE_DROP")
+
+backup_sshd_config() {
+    SSHD_BACKUP_DIR="${SSHD_BACKUP_ROOT}/$(date '+%Y%m%d-%H%M%S')"
+    mkdir -p "$SSHD_BACKUP_DIR"
+    chmod 700 "$SSHD_BACKUP_ROOT"
+
+    local f
+    for f in "${SSHD_MANAGED_FILES[@]}"; do
+        if [[ -f "$f" ]]; then
+            cp -a "$f" "${SSHD_BACKUP_DIR}/$(basename "$f")"
+        fi
+    done
+
+    # Pristine copy of the distribution config, kept from the very first run
+    if [[ -f "$SSHD_CONFIG" && ! -f "${SSHD_CONFIG}.bak" ]]; then
+        cp -a "$SSHD_CONFIG" "${SSHD_CONFIG}.bak"
+    fi
+    log "[INFO] sshd config backed up to ${SSHD_BACKUP_DIR}"
+}
+
+restore_sshd_config() {
+    local f saved
+    for f in "${SSHD_MANAGED_FILES[@]}"; do
+        saved="${SSHD_BACKUP_DIR}/$(basename "$f")"
+        if [[ -f "$saved" ]]; then
+            cp -a "$saved" "$f"
+        else
+            rm -f "$f"      # did not exist before this run
+        fi
+    done
+}
+
+# =============================================================================
 # Step 4b — PVE cluster: root SSH between nodes
 # =============================================================================
 
@@ -525,17 +572,25 @@ step_harden_sshd() {
 
     require_valid_key
 
-    # Backup main config
-    if [[ ! -f "${SSHD_CONFIG}.bak" ]]; then
-        cp "$SSHD_CONFIG" "${SSHD_CONFIG}.bak"
-        ok "Backup created: ${SSHD_CONFIG}.bak"
-    fi
+    ok "Backup of this run: ${SSHD_BACKUP_DIR}"
 
-    # Ensure include directive is present in main sshd_config
-    if ! grep -q "^Include /etc/ssh/sshd_config.d/\*.conf" "$SSHD_CONFIG"; then
-        echo "" >> "$SSHD_CONFIG"
-        echo "Include /etc/ssh/sshd_config.d/*.conf" >> "$SSHD_CONFIG"
-        ok "Added Include directive to ${SSHD_CONFIG}"
+    # The Include has to be the first directive: sshd keeps the first value it
+    # reads, so an Include at the end lets every sshd_config line override the
+    # drop-ins (and would land inside a trailing Match block). Earlier versions
+    # of this script appended it — move such a line to the top.
+    local first_directive
+    first_directive=$(awk '!/^[[:space:]]*(#|$)/ {print; exit}' "$SSHD_CONFIG")
+    if [[ "$first_directive" != "$SSHD_INCLUDE_LINE" ]]; then
+        if grep -qxF "$SSHD_INCLUDE_LINE" "$SSHD_CONFIG"; then
+            sed -i '\|^Include /etc/ssh/sshd_config\.d/\*\.conf$|d' "$SSHD_CONFIG"
+            info "Include directive was not the first directive — moving it to the top"
+        fi
+        if [[ -s "$SSHD_CONFIG" ]]; then
+            sed -i "1i ${SSHD_INCLUDE_LINE}" "$SSHD_CONFIG"
+        else
+            echo "$SSHD_INCLUDE_LINE" > "$SSHD_CONFIG"
+        fi
+        ok "Include directive placed at the top of ${SSHD_CONFIG}"
     fi
 
     mkdir -p /etc/ssh/sshd_config.d
@@ -619,17 +674,83 @@ EOF
 
     ok "Hardened config written to ${SSHD_HARDENED_DROP}"
 
-    # Validate config before reloading
-    if sshd -t 2>/dev/null; then
-        ok "sshd config validation passed"
-        systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null
-        ok "SSH service reloaded"
-    else
-        err "sshd config validation FAILED — restoring backup"
-        cp "${SSHD_CONFIG}.bak" "$SSHD_CONFIG"
-        rm -f "$SSHD_HARDENED_DROP" "$SSHD_PVE_DROP"
-        die "Rolled back. Check sshd config manually: sshd -T"
+    # Earlier versions used 99-*, which lost against every other drop-in
+    if [[ -f "$SSHD_HARDENED_DROP_OLD" ]]; then
+        rm -f "$SSHD_HARDENED_DROP_OLD"
+        ok "Removed old ${SSHD_HARDENED_DROP_OLD}"
     fi
+
+    # Validate config before reloading
+    local sshd_check
+    if sshd_check=$(sshd -t 2>&1); then
+        ok "sshd config validation passed"
+        if systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null; then
+            ok "SSH service reloaded"
+        else
+            warn "SSH service reload failed — check: systemctl status ssh"
+        fi
+    else
+        err "sshd config validation FAILED:"
+        printf '%s\n' "$sshd_check" | sed 's/^/      /'
+        log "[ERR]  sshd -t: ${sshd_check}"
+        restore_sshd_config
+        die "Rolled back to the state before this run (backup: ${SSHD_BACKUP_DIR})."
+    fi
+
+    verify_sshd_effective
+}
+
+# A drop-in that sorts earlier, a Match block or a leftover line in
+# sshd_config can still override the hardening. Check what sshd actually
+# uses, not what was written.
+verify_sshd_effective() {
+    local effective problems=()
+    if ! effective=$(sshd -T 2>&1); then
+        warn "sshd -T failed — cannot verify the effective config:"
+        printf '%s\n' "$effective" | sed 's/^/      /'
+        return 0
+    fi
+
+    local key want have
+    for key in passwordauthentication kbdinteractiveauthentication permitrootlogin; do
+        # permitrootlogin is the global value; the PVE exception is a Match
+        # block and checked separately below
+        want="no"
+        have=$(awk -v k="$key" '$1 == k {print $2; exit}' <<<"$effective")
+        [[ "$have" == "$want" ]] || problems+=("${key} ${have:-<unset>}  (expected: ${want})")
+    done
+
+    local groups
+    groups=$(awk '$1 == "allowgroups" {print $2}' <<<"$effective" | sort -u | paste -sd' ')
+    [[ "$groups" == "$SSH_GROUP" ]] \
+        || problems+=("allowgroups ${groups:-<unset>}  (expected: ${SSH_GROUP})")
+
+    if [[ ${#PVE_NODE_ADDRS[@]} -gt 0 ]]; then
+        local node="${PVE_NODE_ADDRS[0]}" root_node
+        root_node=$(sshd -T -C "user=root,host=${node},addr=${node}" 2>/dev/null \
+            | awk '$1 == "permitrootlogin" {print $2; exit}' || true)
+        case "$root_node" in
+            prohibit-password|without-password) ;;
+            *) problems+=("permitrootlogin ${root_node:-<unset>} from ${node}  (expected: prohibit-password for PVE nodes)") ;;
+        esac
+    fi
+
+    if [[ ${#problems[@]} -eq 0 ]]; then
+        ok "Effective config verified (sshd -T): no passwords, no root, AllowGroups ${SSH_GROUP}"
+        return 0
+    fi
+
+    echo ""
+    echo -e "  ${RED}${BOLD}$(printf '!%.0s' {1..60})${NC}"
+    err "${BOLD}Hardening is NOT effective — sshd -T reports:${NC}"
+    local p
+    for p in "${problems[@]}"; do
+        err "  ${p}"
+    done
+    echo -e "  ${YELLOW}Another drop-in, a Match block or sshd_config itself overrides it. Find it:${NC}"
+    echo -e "  ${BOLD}grep -rniE 'PasswordAuthentication|KbdInteractive|PermitRootLogin|AllowGroups' ${SSHD_CONFIG} /etc/ssh/sshd_config.d/${NC}"
+    echo -e "  ${RED}${BOLD}$(printf '!%.0s' {1..60})${NC}"
+    echo ""
 }
 
 # =============================================================================
@@ -745,6 +866,7 @@ main() {
     step_setup_git
     step_create_banner
     step_configure_fail2ban
+    backup_sshd_config
     step_pve_root_ssh
     # Keys first: hardening switches off password login, so it must never run
     # before the user has a working key (see require_valid_key).
