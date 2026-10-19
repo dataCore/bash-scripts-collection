@@ -29,6 +29,7 @@
 #   /etc/fluent-bit/conf.d/*.conf                     inputs/outputs per source
 #   /var/lib/fluent-bit/storage/                      on-disk buffer (storage.path)
 #   /var/lib/fluent-bit/systemd.db                    journal cursor (linux.conf)
+#   /var/lib/fluent-bit/proxmox.db                    tail offsets (proxmox.conf)
 #   /etc/systemd/system/fluent-bit.service.d/datacore.conf   ExecStart override
 #
 # Required:
@@ -56,7 +57,7 @@
 #
 # Re-running is safe and idempotent: datacore.conf is regenerated from scratch,
 # so re-running with a different --host switches the target and restarts the
-# service.
+# service. Docker is only restarted when --docker had to change daemon.json.
 #
 # Examples:
 #   install-log.sh --host log.geek.ch --docker
@@ -82,6 +83,9 @@ PARSERS_CONF="/etc/fluent-bit/parsers.conf"
 DROPIN_DIR="/etc/systemd/system/fluent-bit.service.d"
 DROPIN="${DROPIN_DIR}/datacore.conf"
 DAEMON_JSON="/etc/docker/daemon.json"
+FB_KEYRING="/etc/apt/keyrings/fluentbit.asc"
+PROXMOX_DB="/var/lib/fluent-bit/proxmox.db"
+PROXMOX_DB_OLD="/var/log/fluent-bit-proxmox.db"   # location before 2026-10
 STORAGE_DIR="/var/lib/fluent-bit/storage"       # filesystem buffer (storage.path)
 LOG_FILE="/var/log/datacore-install.log"
 # Resolve real script location even when called via symlink (e.g. from link.sh)
@@ -112,6 +116,7 @@ VLAN=""
 FB_BIN=""
 REPO_ID=""
 REPO_CODENAME=""
+DOCKER_CHANGED=false    # daemon.json was written by this run
 
 # =============================================================================
 # Helpers
@@ -168,14 +173,22 @@ apt_update() {
 # =============================================================================
 # Parse Arguments
 # =============================================================================
+# An option at the end of the line used to fail with bash's "shift count"
+# error, and "--host --docker" silently took "--docker" as the host.
+# A password may start with "--", so --pass only needs a non-empty value.
+need_value() {
+    [[ $# -ge 2 && -n "$2" ]] || die "$1 needs a value (use --help)"
+    [[ "$1" == "--pass" || "$2" != --* ]] || die "$1 needs a value, got option $2 (use --help)"
+}
+
 parse_args() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --host)      O2_HOST="${2:-}"; shift 2 ;;
-            --user)      O2_USER="${2:-}"; shift 2 ;;
-            --pass)      O2_PASSWD="${2:-}"; shift 2 ;;
-            --org)       O2_ORG="${2:-}"; shift 2 ;;
-            --vlan)      VLAN_OVERRIDE="${2:-}"; shift 2 ;;
+            --host)      need_value "$@"; O2_HOST="$2"; shift 2 ;;
+            --user)      need_value "$@"; O2_USER="$2"; shift 2 ;;
+            --pass)      need_value "$@"; O2_PASSWD="$2"; shift 2 ;;
+            --org)       need_value "$@"; O2_ORG="$2"; shift 2 ;;
+            --vlan)      need_value "$@"; VLAN_OVERRIDE="$2"; shift 2 ;;
             --docker)    OPT_DOCKER=true; shift ;;
             --proxmox)   OPT_PROXMOX=true; shift ;;
             --unifi)     OPT_UNIFI=true; shift ;;
@@ -243,12 +256,19 @@ step_get_credentials() {
     # part of the API reachable from every network (the rest is internal-only,
     # a host outside those ranges would get 403 with valid credentials). An
     # empty array writes nothing and creates no stream; bad credentials -> 401.
-    # Pass credentials via stdin config so they don't show up in the process list
+    # Pass credentials via stdin config so they don't show up in the process
+    # list. A quoted curl config value takes \" and \\ escapes, like the env
+    # file below. On a connection error curl still prints "000" through -w,
+    # so a fallback must not append a second one.
+    local esc_creds
+    esc_creds=$(printf '%s' "${O2_USER}:${O2_PASSWD}" | sed 's/[\\"]/\\&/g')
     http_status=$(curl -s -o /dev/null -w "%{http_code}" \
+        --connect-timeout 10 --max-time 30 \
         --config - \
         -X POST -H "Content-Type: application/json" -d '[]' \
         "https://${O2_HOST}/api/${O2_ORG}/syslog/_json" \
-        <<< "user = \"${O2_USER}:${O2_PASSWD}\"" || echo "000")
+        <<< "user = \"${esc_creds}\"") || true
+    [[ -n "$http_status" ]] || http_status="000"
 
     if [[ "$http_status" == "200" ]]; then
         ok "Credentials verified successfully"
@@ -375,14 +395,18 @@ step_install_fluent_bit() {
     fi
 
     info "Adding Fluent Bit APT repository..."
-    curl -fsSL https://packages.fluentbit.io/fluentbit.key \
-        | gpg --dearmor > /usr/share/keyrings/fluentbit-keyring.gpg
+    # The key is ASCII-armored: apt reads it from a .asc file directly, so
+    # no gpg --dearmor (gnupg is not installed on a minimal Debian).
+    install -m 0755 -d /etc/apt/keyrings
+    curl -fsSL https://packages.fluentbit.io/fluentbit.key -o "$FB_KEYRING"
+    chmod a+r "$FB_KEYRING"
 
     detect_os
 
-    echo "deb [signed-by=/usr/share/keyrings/fluentbit-keyring.gpg] \
+    echo "deb [signed-by=${FB_KEYRING}] \
 https://packages.fluentbit.io/${REPO_ID}/${REPO_CODENAME} ${REPO_CODENAME} main" \
         | tee /etc/apt/sources.list.d/fluent-bit.list > /dev/null
+    rm -f /usr/share/keyrings/fluentbit-keyring.gpg   # dearmored key of older installs
     ok "Repository added: ${REPO_ID}/${REPO_CODENAME}"
 
     apt_update
@@ -500,6 +524,7 @@ step_deploy_confd() {
     if $OPT_PROXMOX; then
         cp "${confd_source}/proxmox.conf" "${CONFD}/proxmox.conf"
         ok "Deployed: proxmox.conf"
+        migrate_proxmox_db
     fi
     if $OPT_UNIFI; then
         cp "${confd_source}/unifi.conf" "${CONFD}/unifi.conf"
@@ -513,6 +538,26 @@ step_deploy_confd() {
         cp "${confd_source}/truenas.conf" "${CONFD}/truenas.conf"
         ok "Deployed: truenas.conf"
     fi
+}
+
+# proxmox.conf kept its tail DB in /var/log until 2026-10; it belongs in
+# /var/lib/fluent-bit with the other state. Copy the old DB over so the
+# offsets survive and task lines already shipped are not sent again.
+# Fluent Bit is stopped first: the DB is SQLite in WAL mode, and a copy
+# taken while it writes can be inconsistent. The restart follows in step 7.
+migrate_proxmox_db() {
+    [[ -f "$PROXMOX_DB_OLD" && ! -e "$PROXMOX_DB" ]] || return 0
+    if systemctl is-active --quiet fluent-bit; then
+        systemctl stop fluent-bit
+    fi
+    local suffix
+    for suffix in "" -wal -shm; do
+        if [[ -f "${PROXMOX_DB_OLD}${suffix}" ]]; then
+            cp -p "${PROXMOX_DB_OLD}${suffix}" "${PROXMOX_DB}${suffix}"
+        fi
+    done
+    ok "Proxmox tail DB copied: ${PROXMOX_DB_OLD} -> ${PROXMOX_DB}"
+    info "The old file is no longer used and can be removed: rm ${PROXMOX_DB_OLD}*"
 }
 
 # =============================================================================
@@ -547,13 +592,19 @@ EOF
 # =============================================================================
 # Step 6 — Configure Docker Logging Driver (optional)
 # =============================================================================
+docker_uses_fluentd() {
+    [[ -f "$DAEMON_JSON" ]] || return 1
+    python3 -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1])).get("log-driver") == "fluentd" else 1)' \
+        "$DAEMON_JSON" 2>/dev/null
+}
+
 step_configure_docker() {
     if ! $OPT_DOCKER; then
         # Without --docker nothing listens on localhost:24224 any more. A
         # fluentd log-driver left over from an earlier --docker run then fills
         # its 1 MB async buffer and dockerd logs "Buffer full" for every
         # container line (seen on dataCoreLog03, 2026-09-28).
-        if [[ -f "$DAEMON_JSON" ]] && python3 -c "import json,sys; sys.exit(0 if json.load(open('$DAEMON_JSON')).get('log-driver')=='fluentd' else 1)" 2>/dev/null; then
+        if docker_uses_fluentd; then
             warn "${DAEMON_JSON} still uses the fluentd log-driver, but --docker is not set"
             warn "Nothing listens on localhost:24224 - container logs are dropped and dockerd floods the journal"
             warn "Either re-run with --docker, or set \"log-driver\": \"local\" (remove log-opts), restart Docker and recreate the containers"
@@ -564,7 +615,7 @@ step_configure_docker() {
 
     command -v docker &>/dev/null || die "Docker is not installed. Run install-docker.sh first."
 
-    if [[ -f "$DAEMON_JSON" ]] && python3 -c "import json,sys; sys.exit(0 if json.load(open('$DAEMON_JSON')).get('log-driver')=='fluentd' else 1)" 2>/dev/null; then
+    if docker_uses_fluentd; then
         ok "Docker already configured with fluentd logging driver"
         return
     fi
@@ -597,6 +648,7 @@ PYEOF
 }
 EOF
     fi
+    DOCKER_CHANGED=true
     ok "Docker daemon.json configured with fluentd logging driver"
 }
 
@@ -631,7 +683,9 @@ step_enable_fluent_bit() {
         warn "Service does not seem to use ${DC_CONF} — check ${DROPIN}"
     fi
 
-    if $OPT_DOCKER; then
+    # Only after a daemon.json change: with live-restore off a restart stops
+    # every container, which a re-run on a configured host must not do.
+    if $DOCKER_CHANGED; then
         info "Restarting Docker to activate fluentd logging driver..."
         systemctl restart docker
         ok "Docker restarted"
