@@ -11,6 +11,7 @@
 # 2024-04-15 Initial Version
 # 2026-05-01 Fix reboot detection for Proxmox (proxmox-kernel-* package names)
 # 2026-08-19 Fix "reboot: command not found" (sbin missing from PATH)
+# 2026-10-19 Abort on a failed upgrade, keep local conffiles
 #
 # =======================================================================
 # START script
@@ -52,20 +53,39 @@ do_reboot() {
 
 # Update the script collection
 update-scripts
+rc=$?
+if [ "$rc" -eq 0 ]; then
+    echo "[✓] update-scripts finished (exit 0)."
+else
+    echo "[!] Warning: update-scripts failed (exit $rc), continuing with the current scripts."
+fi
+
+# Finish an interrupted dpkg run first, otherwise apt-get refuses to work
+if ! dpkg --configure -a; then
+    echo "Error: dpkg --configure -a failed."
+    exit 1
+fi
 
 # Start update
-if ! apt-get update; then
+if ! apt-get -o DPkg::Lock::Timeout=600 update; then
     echo "Error: apt-get update failed."
     exit 1
 fi
 
-# Install upgrades and kernel updates
-apt-get dist-upgrade -y
+# Install upgrades and kernel updates. Locally modified conffiles are kept
+# instead of stopping at the prompt; a running apt (unattended-upgrades) is
+# waited for instead of failing on the lock.
+apt-get -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold \
+    -o DPkg::Lock::Timeout=600 dist-upgrade -y
+rc=$?
+if [ "$rc" -ne 0 ]; then
+    echo "Error: apt-get dist-upgrade failed (exit $rc). No cleanup, no reboot."
+    exit 1
+fi
 
 # Clean up unnecessary packages and cache
 echo "Cleaning up..."
 apt-get autoremove -y
-apt-get autoclean -y
 apt-get clean -y
 
 # Check if a reboot is required
