@@ -94,12 +94,19 @@ check_import() {
     fi
 }
 
+# Run a PostgreSQL client in the selected service with PGUSER/PGPASSWORD
+# from PG_ENV_SH (the password stays inside the container).
+# Usage: pg_exec <command> [args...]
+pg_exec() {
+    # shellcheck disable=SC2016  # expanded in the container
+    dc exec -T "$SERVICENAME" sh -c "${PG_ENV_SH}"'exec "$@"' pg_exec "$@"
+}
+
 # Run one SQL statement in a database of the selected PostgreSQL service.
 # stdin is /dev/null so callers can loop over a here-string.
 # Usage: pg_query <database> <sql>
 pg_query() {
-    dc exec -T "$SERVICENAME" \
-        psql -X -v ON_ERROR_STOP=1 -U "$CONTAINERENV_DBUSER" -d "$1" -tAc "$2" </dev/null | tr -d '\r'
+    pg_exec psql -X -v ON_ERROR_STOP=1 -U "$CONTAINERENV_DBUSER" -d "$1" -tAc "$2" </dev/null | tr -d '\r'
 }
 
 # Map a backup filename to "<type> <suffix>"; prints nothing for unknown files.
@@ -253,11 +260,30 @@ export MYSQL_PWD
 # Succeeds when a password was found (or the image allows an empty one)
 # shellcheck disable=SC2016
 MYSQL_PW_CHECK='[ -n "$MYSQL_PWD" ] || [ -n "${MARIADB_ALLOW_EMPTY_ROOT_PASSWORD:-}${MYSQL_ALLOW_EMPTY_PASSWORD:-}" ]'
-# PostgreSQL superuser: POSTGRES_USER(_FILE) as the official image, else postgres
+# PostgreSQL superuser, resolved in the container and exported as PGUSER (and
+# PGPASSWORD when a password is set, for images without local trust auth):
+# official image POSTGRES_USER/_PASSWORD(_FILE); bitnami/postgresql
+# POSTGRESQL_POSTGRES_PASSWORD (user postgres), else POSTGRESQL_USERNAME/
+# POSTGRESQL_PASSWORD; default user postgres.
 # shellcheck disable=SC2016
-PG_USER_SH='u="${POSTGRES_USER:-}"
+PG_ENV_SH='u="${POSTGRES_USER:-}"
 if [ -z "$u" ] && [ -n "${POSTGRES_USER_FILE:-}" ] && [ -r "$POSTGRES_USER_FILE" ]; then u=$(cat "$POSTGRES_USER_FILE"); fi
-echo "${u:-postgres}"'
+p="${POSTGRES_PASSWORD:-}"
+if [ -z "$p" ] && [ -n "${POSTGRES_PASSWORD_FILE:-}" ] && [ -r "$POSTGRES_PASSWORD_FILE" ]; then p=$(cat "$POSTGRES_PASSWORD_FILE"); fi
+if [ -z "$u" ]; then
+    if [ -n "${POSTGRESQL_POSTGRES_PASSWORD:-}" ]; then
+        u=postgres; p="$POSTGRESQL_POSTGRES_PASSWORD"
+    else
+        u="${POSTGRESQL_USERNAME:-}"; p="${p:-${POSTGRESQL_PASSWORD:-}}"
+    fi
+fi
+PGUSER="${u:-postgres}"
+export PGUSER
+if [ -n "$p" ]; then PGPASSWORD="$p"; export PGPASSWORD; fi
+'
+# Prints the resolved user (no password)
+# shellcheck disable=SC2016
+PG_USER_SH="${PG_ENV_SH}"'echo "$PGUSER"'
 
 # GitLab's backup_path, bind-mounted at the same path on the host and in the
 # container (as in backup-docker)
@@ -514,7 +540,7 @@ elif [ "$TYPE" == postgres ]; then
     # The dump switches databases itself (\connect), and apps often use a DB
     # other than POSTGRES_DB, so every database is checked. Fail closed: if a
     # check does not return a number, the instance is treated as not empty.
-    if ! PG_DATABASES=$(dc exec -T "$SERVICENAME" \
+    if ! PG_DATABASES=$(pg_exec \
         psql -U "$CONTAINERENV_DBUSER" -d "$DBNAME" -tAc \
         "SELECT datname FROM pg_database WHERE NOT datistemplate" \
         | tr -d '\r'); then
@@ -529,7 +555,7 @@ elif [ "$TYPE" == postgres ]; then
     USERTABLES=0
     PG_TABLECOUNTS=()
     for db in "${PG_DBLIST[@]}"; do
-        if ! COUNT=$(dc exec -T "$SERVICENAME" \
+        if ! COUNT=$(pg_exec \
             psql -U "$CONTAINERENV_DBUSER" -d "$db" -tAc \
             "SELECT count(*) FROM pg_catalog.pg_tables WHERE schemaname NOT IN ('pg_catalog','information_schema') AND schemaname !~ '^_?timescaledb'" \
             | tr -d '\r\n'); then
@@ -598,7 +624,7 @@ elif [ "$TYPE" == postgres ]; then
     # Expected on a fresh instance: 'role ... already exists' and
     # 'database ... already exists' for the user/DB the image created at init.
     IMPORT_RC=0
-    IMPORT_STDERR=$( { decompress "$SELECTED" | dc exec -T "$SERVICENAME" \
+    IMPORT_STDERR=$( { decompress "$SELECTED" | pg_exec \
         psql -q -U "$CONTAINERENV_DBUSER" -d "$DBNAME" >/dev/null; } 2>&1 ) || IMPORT_RC=$?
     # Leave restoring mode even if the import failed, then judge the import.
     while read -r db _; do

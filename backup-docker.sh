@@ -142,13 +142,23 @@ image_db_type() {
     esac
 }
 
+# Run a PostgreSQL client in the container with PGUSER/PGPASSWORD from
+# PG_ENV_SH (the password stays inside the container).
+# Usage: pg_exec <container> <command> [args...]
+pg_exec() {
+    local cont="$1"
+    shift
+    # shellcheck disable=SC2016  # expanded in the container
+    docker exec "$cont" sh -c "${PG_ENV_SH}"'exec "$@"' pg_exec "$@"
+}
+
 # Print "<database> <version>" for every database with the TimescaleDB extension.
 # Usage: timescaledb_versions <container> <user>
 timescaledb_versions() {
     local cont="$1" user="$2" db ver
-    for db in $(docker exec "$cont" psql -U "$user" -d postgres -tAc \
+    for db in $(pg_exec "$cont" psql -U "$user" -d postgres -tAc \
         "SELECT datname FROM pg_database WHERE datallowconn" | tr -d '\r'); do
-        ver=$(docker exec "$cont" psql -U "$user" -d "$db" -tAc \
+        ver=$(pg_exec "$cont" psql -U "$user" -d "$db" -tAc \
             "SELECT extversion FROM pg_extension WHERE extname = 'timescaledb'" | tr -d '\r')
         [ -n "$ver" ] && echo "$db $ver"
     done
@@ -242,11 +252,30 @@ export MYSQL_PWD
 # Succeeds when a password was found (or the image allows an empty one)
 # shellcheck disable=SC2016
 MYSQL_PW_CHECK='[ -n "$MYSQL_PWD" ] || [ -n "${MARIADB_ALLOW_EMPTY_ROOT_PASSWORD:-}${MYSQL_ALLOW_EMPTY_PASSWORD:-}" ]'
-# PostgreSQL superuser: POSTGRES_USER(_FILE) as the official image, else postgres
+# PostgreSQL superuser, resolved in the container and exported as PGUSER (and
+# PGPASSWORD when a password is set, for images without local trust auth):
+# official image POSTGRES_USER/_PASSWORD(_FILE); bitnami/postgresql
+# POSTGRESQL_POSTGRES_PASSWORD (user postgres), else POSTGRESQL_USERNAME/
+# POSTGRESQL_PASSWORD; default user postgres.
 # shellcheck disable=SC2016
-PG_USER_SH='u="${POSTGRES_USER:-}"
+PG_ENV_SH='u="${POSTGRES_USER:-}"
 if [ -z "$u" ] && [ -n "${POSTGRES_USER_FILE:-}" ] && [ -r "$POSTGRES_USER_FILE" ]; then u=$(cat "$POSTGRES_USER_FILE"); fi
-echo "${u:-postgres}"'
+p="${POSTGRES_PASSWORD:-}"
+if [ -z "$p" ] && [ -n "${POSTGRES_PASSWORD_FILE:-}" ] && [ -r "$POSTGRES_PASSWORD_FILE" ]; then p=$(cat "$POSTGRES_PASSWORD_FILE"); fi
+if [ -z "$u" ]; then
+    if [ -n "${POSTGRESQL_POSTGRES_PASSWORD:-}" ]; then
+        u=postgres; p="$POSTGRESQL_POSTGRES_PASSWORD"
+    else
+        u="${POSTGRESQL_USERNAME:-}"; p="${p:-${POSTGRESQL_PASSWORD:-}}"
+    fi
+fi
+PGUSER="${u:-postgres}"
+export PGUSER
+if [ -n "$p" ]; then PGPASSWORD="$p"; export PGPASSWORD; fi
+'
+# Prints the resolved user (no password)
+# shellcheck disable=SC2016
+PG_USER_SH="${PG_ENV_SH}"'echo "$PGUSER"'
 
 # GitLab writes its backups to backup_path from gitlab.rb. By convention that
 # is this directory, bind-mounted at the same path on the host and in the
@@ -348,6 +377,7 @@ for cont in $ALLCONTAINER; do
     # DATABASE DUMP – once per container, before and independent of the
     # volumes: the data dir may just as well be a bind mount.
     START=$(date +%s)
+    DUMP_FAILED=false
     case "$DBTYPE" in
     mariadb|mysql)
         if [ "$DBTYPE" == mariadb ]; then
@@ -361,6 +391,7 @@ for cont in $ALLCONTAINER; do
         fi
         if ! docker exec "$cont" sh -c "${MYSQL_PW_SH}${MYSQL_PW_CHECK}"; then
             fail_item "${CONTAINERNAME}: no root password (MYSQL_ROOT_PASSWORD, MARIADB_ROOT_PASSWORD, DB_ROOT_PASSWORD or *_FILE), dump skipped."
+            DUMP_FAILED=true
         else
             begin_backup "$OUTPUT"
             # --single-transaction: consistent InnoDB snapshot without locking;
@@ -380,6 +411,7 @@ for cont in $ALLCONTAINER; do
             else
                 discard_backup "$OUTPUT"
                 fail_item "${DUMPTOOL} failed in container '${CONTAINERNAME}'."
+                DUMP_FAILED=true
             fi
         fi
         ;;
@@ -391,6 +423,7 @@ for cont in $ALLCONTAINER; do
         if ! CONTAINERENV_DBUSER=$(docker exec "$cont" sh -c "$PG_USER_SH" | tr -d '\r') \
             || [ -z "$CONTAINERENV_DBUSER" ]; then
             fail_item "${CONTAINERNAME}: could not determine the PostgreSQL user, dump skipped."
+            DUMP_FAILED=true
         else
             # TimescaleDB: restore-docker needs the extension version of every
             # database (same version, timescaledb_pre_restore). It goes into the
@@ -403,8 +436,7 @@ for cont in $ALLCONTAINER; do
                      # shellcheck disable=SC2001  # prefix every line
                      sed 's/^/-- backup-docker timescaledb: /' <<< "$TSDB_INFO"
                  fi
-                 docker exec "$cont" sh -c 'exec pg_dumpall -U "$0"' \
-                     "$CONTAINERENV_DBUSER" 2> "$DUMP_ERR"
+                 pg_exec "$cont" pg_dumpall -U "$CONTAINERENV_DBUSER" 2> "$DUMP_ERR"
                } | "${DUMP_COMPRESS[@]}" > "$PART"; then
                 print_pgdump_stderr "$DUMP_ERR" "$TSDB_INFO"
                 if [ -n "$TSDB_INFO" ]; then
@@ -416,6 +448,7 @@ for cont in $ALLCONTAINER; do
                 cat "$DUMP_ERR"
                 discard_backup "$OUTPUT"
                 fail_item "pg_dumpall failed in container '${CONTAINERNAME}'."
+                DUMP_FAILED=true
             fi
         fi
         ;;
@@ -438,6 +471,7 @@ for cont in $ALLCONTAINER; do
         else
             discard_backup "$OUTPUT"
             fail_item "mongodump failed in container '${CONTAINERNAME}'."
+            DUMP_FAILED=true
         fi
         ;;
 
@@ -448,16 +482,24 @@ for cont in $ALLCONTAINER; do
         # its file name, which carries the token 'gitlab-backup restore' needs.
         OUTPUT="${TIMESTAMP}_${PROJECTNAME}.${CONTAINERNAME}.gitlabbackup.tar"
         print_status "  🦊 GitLab: ${OUTPUT}... "
+        # Only an archive newer than this marker is from this run; an old one
+        # left in the cache must never be stored as today's backup.
+        GITLAB_MARKER="${TEMPDIR}/gitlab-${CONTAINERNAME}.marker"
+        touch "$GITLAB_MARKER"
         if ! docker exec -u root "$cont" bash -c \
             "mkdir -p '${GITLAB_BACKUP_CACHE}' && chown git '${GITLAB_BACKUP_CACHE}' && chmod 700 '${GITLAB_BACKUP_CACHE}'" \
             || ! docker exec -u root "$cont" bash -c \
             "export COMPRESS_CMD=gzip SKIP=artifacts,registry && gitlab-backup create --quiet"; then
             fail_item "gitlab-backup create failed in container '${CONTAINERNAME}'."
         else
-            GITLAB_FILE=$(find "$GITLAB_BACKUP_CACHE" -maxdepth 1 -name '*_gitlab_backup.tar' \
-                -printf '%T@ %f\n' 2>/dev/null | sort -n | tail -n 1 | cut -d' ' -f2-)
+            GITLAB_FILE=""
+            if [ -d "$GITLAB_BACKUP_CACHE" ]; then
+                GITLAB_FILE=$( { find "$GITLAB_BACKUP_CACHE" -maxdepth 1 -name '*_gitlab_backup.tar' \
+                    -newer "$GITLAB_MARKER" -printf '%T@ %f\n' 2>/dev/null || true; } \
+                    | sort -n | tail -n 1 | cut -d' ' -f2-)
+            fi
             if [ -z "$GITLAB_FILE" ]; then
-                fail_item "No *_gitlab_backup.tar in ${GITLAB_BACKUP_CACHE} on the host (backup_path in gitlab.rb and the bind mount must point there)."
+                fail_item "No new *_gitlab_backup.tar in ${GITLAB_BACKUP_CACHE} on the host (backup_path in gitlab.rb and the bind mount must point there)."
             else
                 begin_backup "$OUTPUT"
                 if run_tar -cf "$PART" -C "$GITLAB_BACKUP_CACHE" "$GITLAB_FILE"; then
@@ -491,6 +533,13 @@ for cont in $ALLCONTAINER; do
     # NAMED VOLUMES (anonymous and bind mounts are excluded). A container with
     # a database dump or GitLab backup gets no volume tar – the dump is the
     # consistent copy; only MongoDB's config volumes are tarred as well.
+    # When the dump was skipped or failed, the raw volumes are tarred instead:
+    # not consistent while the DB runs, but better than no new copy at all
+    # (the run still exits non-zero).
+    if [ "$DUMP_FAILED" == true ]; then
+        echo "  ⚠️  ${CONTAINERNAME}: no dump, tarring its volumes as a fallback."
+        DBTYPE=""
+    fi
     VOLUMES=$(docker inspect \
         --format '{{ range .Mounts }}{{ if eq .Type "volume" }}{{ .Name }}{{ "\n" }}{{ end }}{{ end }}' \
         "$cont" 2>/dev/null | grep -v '^$' || true)
