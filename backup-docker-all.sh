@@ -52,7 +52,8 @@ FAILED_PROJECTS=()
 for PROJECTNAME in $ALLPROJECTS; do
     RC=0
     backup-docker "$PROJECTNAME" "$BACKUPDIR" "$BACKUPDURATIONDAYS" || RC=$?
-    if [ "$RC" -eq 2 ]; then
+    # 75 = skipped (EXIT_SKIPPED in backup-docker); 2 is a real error of tar etc.
+    if [ "$RC" -eq 75 ]; then
         echo "⚠️  Project '${PROJECTNAME}' skipped (no running containers)."
     elif [ "$RC" -ne 0 ]; then
         echo "❌ Backup of project '${PROJECTNAME}' failed (exit $RC). Continuing with next project."
