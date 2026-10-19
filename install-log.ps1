@@ -37,7 +37,9 @@
     Re-running is safe and idempotent: datacore.conf is regenerated from
     scratch. Configs from an older hand-made setup in the install directory
     are moved to C:\ProgramData\fluent-bit\legacy-<timestamp>\, their DB files
-    are taken over so no events are shipped twice or skipped.
+    are taken over so no events are shipped twice or skipped. The event log
+    inputs (winevtlog) use their own DB files: the bookmarks of the former
+    winlog input do not carry over, a new DB starts at the current end.
 
 .PARAMETER O2Host
     OpenObserve endpoint, always the Traefik FQDN (e.g. log.geek.ch).
