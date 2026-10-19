@@ -47,10 +47,12 @@ fi
 # ── Argument parsing ──────────────────────────────────────────────────────────
 MODE="check"
 FORCE_IPSEC=false
+OPT_FIX=false
+OPT_JSON=false
 for arg in "$@"; do
     case "$arg" in
-        --fix)  MODE="fix"  ;;
-        --json) MODE="json" ;;
+        --fix)  OPT_FIX=true;  MODE="fix"  ;;
+        --json) OPT_JSON=true; MODE="json" ;;
         --force-ipsec) FORCE_IPSEC=true ;;
         -h|--help)
             echo "Usage: $0 [--fix [--force-ipsec] | --json]"
@@ -63,6 +65,14 @@ for arg in "$@"; do
         *) echo "Unknown option: $arg"; exit 1 ;;
     esac
 done
+if [[ "$OPT_FIX" == "true" && "$OPT_JSON" == "true" ]]; then
+    echo "Error: --fix and --json cannot be combined" >&2
+    exit 1
+fi
+if [[ "$FORCE_IPSEC" == "true" && "$OPT_FIX" != "true" ]]; then
+    echo "Error: --force-ipsec is only valid together with --fix" >&2
+    exit 1
+fi
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 # In JSON mode stdout must carry nothing but the JSON document.
