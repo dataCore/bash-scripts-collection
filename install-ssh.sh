@@ -20,7 +20,9 @@
 #   7. Configure fail2ban for SSH (5 attempts → bantime)
 #   8. Install pubkeys/<username>.pub as authorized_keys for <username>
 #   9. Harden sshd_config (AllowGroups, key-only, no root, etc.) — only once
-#      authorized_keys holds at least one valid key, so nobody is locked out
+#      authorized_keys holds at least one valid key, so nobody is locked out.
+#      If password or root login is effective now, the accounts that would
+#      lose SSH access are listed first; on a terminal it asks to confirm.
 #  10. On a Proxmox VE cluster node: keep root SSH (key only) from the other
 #      cluster nodes and nowhere else — PVE needs it for migration,
 #      replication and pvesh calls to another node
@@ -571,6 +573,101 @@ require_valid_key() {
     ok "${valid} valid key(s) in ${auth_keys} — safe to disable password login"
 }
 
+# Accounts that can log in interactively: root and regular users (UID >= 1000)
+# with a real shell. Prints "name<TAB>has_password<TAB>in_group<TAB>has_keys".
+list_login_accounts() {
+    local name uid home shell pw in_group has_keys
+    while IFS=: read -r name _ uid _ _ home shell; do
+        [[ "$uid" -eq 0 || ( "$uid" -ge 1000 && "$uid" -ne 65534 ) ]] || continue
+        case "$shell" in
+            */nologin|*/false|*/sync|*/halt|*/shutdown|"") continue ;;
+        esac
+        pw=$(getent shadow "$name" 2>/dev/null | cut -d: -f2 || true)
+        [[ -n "$pw" && "$pw" != \!* && "$pw" != \** ]] && pw=yes || pw=no
+        id -nG "$name" 2>/dev/null | tr ' ' '\n' | grep -qxF "$SSH_GROUP" && in_group=yes || in_group=no
+        [[ -s "${home}/.ssh/authorized_keys" ]] && has_keys=yes || has_keys=no
+        printf '%s\t%s\t%s\t%s\n' "$name" "$pw" "$in_group" "$has_keys"
+    done < <(getent passwd)
+}
+
+# With the 00- drop-in and the Include on top, the hardening now really wins
+# over sshd_config and other drop-ins. On a host where password or root login
+# was effective so far, other accounts can lose SSH access — say so up front,
+# and ask when someone is at the terminal.
+preview_sshd_changes() {
+    print_section "SSH Hardening — Impact Check"
+
+    local current
+    if ! current=$(sshd -T 2>/dev/null); then
+        warn "sshd -T failed — cannot check the current config, continuing"
+        return 0
+    fi
+
+    local pw kbd root groups changes=()
+    pw=$(awk '$1 == "passwordauthentication" {print $2; exit}' <<<"$current")
+    kbd=$(awk '$1 == "kbdinteractiveauthentication" {print $2; exit}' <<<"$current")
+    root=$(awk '$1 == "permitrootlogin" {print $2; exit}' <<<"$current")
+    groups=$(awk '$1 == "allowgroups" {print $2}' <<<"$current" | sort -u | paste -sd' ')
+
+    [[ "$pw" == "yes" ]]   && changes+=("PasswordAuthentication yes → no")
+    [[ "$kbd" == "yes" ]]  && changes+=("KbdInteractiveAuthentication yes → no")
+    [[ "$root" == "yes" ]] && changes+=("PermitRootLogin yes → no")
+    [[ "$groups" != "$SSH_GROUP" ]] && changes+=("AllowGroups ${groups:-<any>} → ${SSH_GROUP}")
+
+    # Root by key (prohibit-password) is not worth a prompt: nobody uses a
+    # password there, and on PVE nodes the cluster exception keeps it.
+    if [[ "$pw" != "yes" && "$kbd" != "yes" && "$root" != "yes" ]]; then
+        ok "Password and root login are not enabled now — no access is lost"
+        return 0
+    fi
+
+    echo ""
+    warn "${BOLD}The hardening changes the effective sshd config:${NC}"
+    local c
+    for c in "${changes[@]}"; do
+        echo -e "       ${YELLOW}•${NC} ${c}"
+    done
+
+    local name has_pw in_group has_keys affected=()
+    while IFS=$'\t' read -r name has_pw in_group has_keys; do
+        [[ "$name" == "$TARGET_USER" ]] && continue
+        if [[ "$name" == "root" ]]; then
+            [[ "$root" == "yes" ]] || continue
+            if [[ ${#PVE_NODE_ADDRS[@]} -gt 0 ]]; then
+                affected+=("root: loses SSH except by key from the PVE cluster nodes")
+            else
+                affected+=("root: loses SSH login (use ${TARGET_USER} + sudo)")
+            fi
+        elif [[ "$in_group" == "no" ]]; then
+            affected+=("${name}: not in ${SSH_GROUP} — loses SSH access entirely")
+        elif [[ "$has_pw" == "yes" && "$has_keys" == "no" ]]; then
+            affected+=("${name}: has a password but no authorized_keys — loses SSH access")
+        fi
+    done < <(list_login_accounts)
+
+    echo ""
+    if [[ ${#affected[@]} -gt 0 ]]; then
+        warn "${BOLD}Accounts that will lose SSH access (best effort):${NC}"
+        local a
+        for a in "${affected[@]}"; do
+            echo -e "       ${RED}•${NC} ${a}"
+        done
+    else
+        info "No other login account found that would lose access."
+    fi
+    info "Before: add needed accounts to '${SSH_GROUP}' and give them a key."
+    echo ""
+
+    if [[ -t 0 && -t 1 ]]; then
+        local answer=""
+        read -r -p "  Apply the hardening now? [y/N] " answer || true
+        [[ "$answer" =~ ^[yYjJ] ]] || die "Aborted — sshd config not changed."
+        ok "Confirmed — continuing"
+    else
+        warn "Not interactive — continuing with the hardening"
+    fi
+}
+
 # =============================================================================
 # Step 6 — Harden sshd_config
 # =============================================================================
@@ -881,6 +978,7 @@ main() {
     # exception and the fail2ban jail, so an abort leaves sshd untouched.
     step_install_authorized_keys
     require_valid_key
+    preview_sshd_changes
     step_configure_fail2ban
     backup_sshd_config
     step_pve_root_ssh
