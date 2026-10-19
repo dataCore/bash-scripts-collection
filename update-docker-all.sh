@@ -14,6 +14,15 @@ if [ "$EUID" -ne 0 ]; then
   echo "Please run this script with sudo or as root."
   exit 1
 fi
+# Backup and update runs must not overlap (an update recreating containers
+# while their volumes are tarred): backup-docker-all and update-docker-all
+# share this lock and wait up to 1 h for each other.
+LOCKFILE=/run/lock/datacore-docker.lock
+exec 9>"$LOCKFILE"
+if ! flock -w 3600 9; then
+    echo "❌ ${LOCKFILE} is still held by another backup/update run after 1 h. Aborting."
+    exit 1
+fi
 # START scripts
 update-scripts
 # START script

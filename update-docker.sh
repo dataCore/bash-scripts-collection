@@ -6,6 +6,10 @@
 # Usage: update-docker {DOCKERCOMPOSE-PROJECTNAME} --auto={y,n,b}
 # Example: update-docker 'datacorecloud' --auto=y
 #
+# 2026-10-19 Answer/--auto validated (only y updates, b backs up first),
+#            git runs as the owner of the project dir and reports errors,
+#            compose -p/-f from the container labels
+#
 # =======================================================================
 # START script
 # =======================================================================
@@ -19,8 +23,14 @@ fi
 
 # Get docker-compose project name from variable or from current directory (lower case)
 PROJECTNAME=$(echo "${1:-$(basename "$PWD")}" | tr '[:upper:]' '[:lower:]')
-AUTO="${2:-}"
-AUTO="${AUTO#--auto=}"
+AUTO=""
+case "${2:-}" in
+    "") ;;
+    --auto=[yYnNbB]) AUTO="${2#--auto=}" ;;
+    *)
+        echo "❌ Invalid option '${2}'. Usage: update-docker {PROJECT} --auto={y,n,b}"
+        exit 1 ;;
+esac
 
 ALLCONTAINER=$(docker ps -q --filter "label=com.docker.compose.project=$PROJECTNAME")
 if [ -z "$ALLCONTAINER" ]; then
@@ -45,30 +55,75 @@ if [ -z "$WORKINGDIR" ] || [ ! -d "$WORKINGDIR" ]; then
     exit 1
 fi
 
+# docker compose for exactly this project: name from the label filter above,
+# compose files as it was started with. Without -f a non-default file name
+# (or several -f files) is not found. Falls back to the default lookup in
+# WORKINGDIR when a recorded file no longer exists.
+FIRST_CONTAINER="${ALLCONTAINER%%$'\n'*}"
+COMPOSE=(docker compose -p "$PROJECTNAME" --project-directory "$WORKINGDIR")
+IFS=',' read -r -a CONFIG_FILES <<< "$(docker inspect \
+    --format '{{ index .Config.Labels "com.docker.compose.project.config_files" }}' "$FIRST_CONTAINER")"
+FILE_ARGS=()
+for f in "${CONFIG_FILES[@]}"; do
+    if [ ! -f "$f" ]; then
+        echo "⚠️  Compose file '${f}' from the container labels is missing, using the default lookup."
+        FILE_ARGS=()
+        break
+    fi
+    FILE_ARGS+=(-f "$f")
+done
+COMPOSE+=("${FILE_ARGS[@]}")
+
 # =======================================================================
 # Check the working directory against its Git remote
 # =======================================================================
 cd "$WORKINGDIR"
 
-if git -C "$WORKINGDIR" rev-parse --is-inside-work-tree &>/dev/null; then
-    GIT_STATUS=$(git -C "$WORKINGDIR" status --porcelain 2>/dev/null)
+# Run git as the owner of the project dir: as root, git refuses a repository
+# owned by someone else ("dubious ownership") and the check silently did
+# nothing; the owner's SSH key and config are needed for the fetch as well.
+# Prompts are disabled so an unattended run cannot hang.
+GIT_OWNER=$(stat -c %U "$WORKINGDIR")
+if [ "$GIT_OWNER" == root ] || [ "$GIT_OWNER" == UNKNOWN ] || ! command -v sudo >/dev/null 2>&1; then
+    GIT=(env LC_ALL=C GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND='ssh -o BatchMode=yes' git -C "$WORKINGDIR")
+else
+    GIT=(sudo -u "$GIT_OWNER" -H -- env LC_ALL=C GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND='ssh -o BatchMode=yes' git -C "$WORKINGDIR")
+fi
+
+GIT_REPO=false
+if GIT_ERR=$("${GIT[@]}" rev-parse --is-inside-work-tree 2>&1 >/dev/null); then
+    GIT_REPO=true
+elif ! grep -q "not a git repository" <<< "$GIT_ERR"; then
+    echo "⚠️  WARNING: Git check of '${WORKINGDIR}' skipped (as user '${GIT_OWNER}'):"
+    echo "     ${GIT_ERR//$'\n'/$'\n'     }"
+fi
+
+if [ "$GIT_REPO" == true ]; then
+    GIT_STATUS=$("${GIT[@]}" status --porcelain)
 
     # Refresh the remote-tracking ref so local and remote can be compared.
-    # Read-only, never touches the working tree. Prompts are disabled and the
-    # whole thing is time-boxed so an unattended run cannot hang on a private
-    # repo or an unreachable remote — if the fetch fails, the comparison below
-    # simply falls back to the last known state of the remote.
-    GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND='ssh -o BatchMode=yes' \
-        timeout 20 git -C "$WORKINGDIR" fetch --quiet &>/dev/null || true
+    # Read-only, never touches the working tree. Time-boxed so a private
+    # repo or an unreachable remote cannot hang the run — if the fetch
+    # fails, the comparison below uses the last known state of the remote.
+    if ! GIT_ERR=$(timeout 20 "${GIT[@]}" fetch --quiet 2>&1); then
+        echo "⚠️  WARNING: 'git fetch' failed in '${WORKINGDIR}', comparing with the last known remote state:"
+        echo "     ${GIT_ERR//$'\n'/$'\n'     }"
+    fi
 
-    GIT_UNPUSHED=$(git -C "$WORKINGDIR" log "@{u}.." --oneline 2>/dev/null || true)
-    GIT_BEHIND=$(git -C "$WORKINGDIR" log "..@{u}" --oneline 2>/dev/null || true)
+    GIT_UNPUSHED=""
+    GIT_BEHIND=""
+    if "${GIT[@]}" rev-parse --abbrev-ref --symbolic-full-name "@{u}" &>/dev/null; then
+        GIT_UNPUSHED=$("${GIT[@]}" log "@{u}.." --oneline)
+        GIT_BEHIND=$("${GIT[@]}" log "..@{u}" --oneline)
+    else
+        echo "ℹ️  '${WORKINGDIR}': the current branch has no upstream, remote not compared."
+    fi
 
     if [ -n "$GIT_STATUS" ] || [ -n "$GIT_UNPUSHED" ]; then
         echo "⚠️  WARNING: Pending Git changes detected in '${WORKINGDIR}'!"
         if [ -n "$GIT_STATUS" ]; then
             echo "   Uncommitted changes:"
-            git -C "$WORKINGDIR" status --short | sed 's/^/     /'
+            "${GIT[@]}" status --short | sed 's/^/     /'
         fi
         if [ -n "$GIT_UNPUSHED" ]; then
             echo "   Unpushed commits:"
@@ -99,7 +154,7 @@ for ENVFILE in "$WORKINGDIR"/.env "$WORKINGDIR"/.env.* "$WORKINGDIR"/*.env; do
     esac
     ENVNAME="${ENVFILE##*/}"
 
-    if git -C "$WORKINGDIR" ls-files --error-unmatch -- "$ENVNAME" &>/dev/null; then
+    if [ "$GIT_REPO" == true ] && "${GIT[@]}" ls-files --error-unmatch -- "$ENVNAME" &>/dev/null; then
         echo "⚠️  WARNING: '${ENVFILE}' is tracked by Git — its secrets are in the repository!"
         echo "   Untrack it and ignore it from now on:"
         echo "     git -C $(printf '%q' "$WORKINGDIR") rm --cached -- $(printf '%q' "$ENVNAME") && echo $(printf '%q' "/$ENVNAME") >> $(printf '%q' "$WORKINGDIR/.gitignore")"
@@ -258,20 +313,25 @@ if [ "$UPDATE_NEEDED" = true ]; then
     else
         read -r -p "Want to continue with the update? (y/n) with a backup? (b): " answer
     fi
-    if [[ $answer == "n" ]]; then
-        echo "❌ Update canceled."
-        exit 0
-    elif [[ $answer == "b" ]]; then
-        echo "📦 Creating backup..."
-        backup-docker "${PROJECTNAME}"
-    fi
+    # Only an explicit y or b updates; anything else (n, empty, a typo) aborts
+    case "$answer" in
+        y|Y) ;;
+        b|B)
+            echo "📦 Creating backup..."
+            backup-docker "${PROJECTNAME}"
+            ;;
+        *)
+            echo "❌ Update canceled."
+            exit 0
+            ;;
+    esac
     # Pull the changed services only, then recreate the changed containers
     # (no 'down' first — avoids leaving the project offline if 'up' fails)
     if [ "${#PULL_SERVICES[@]}" -gt 0 ]; then
         mapfile -t PULL_SERVICES < <(printf '%s\n' "${PULL_SERVICES[@]}" | sort -u)
-        docker compose pull "${PULL_SERVICES[@]}"
+        "${COMPOSE[@]}" pull "${PULL_SERVICES[@]}"
     fi
-    docker compose up -d
+    "${COMPOSE[@]}" up -d
     printf "✅ '%s' updated.\n" "$PROJECTNAME"
 else
     printf " ✅ All up to date!\n"
