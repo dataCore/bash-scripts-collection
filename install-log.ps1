@@ -428,6 +428,9 @@ function Install-Config {
         New-Item -ItemType Directory -Force -Path $dest | Out-Null
         foreach ($f in $legacy) {
             Move-Item $f $dest
+            # The moved file keeps the install directory's ACL (Users: read)
+            # and may hold the old password: lock it down right away
+            Set-PrivateAcl (Join-Path $dest (Split-Path $f -Leaf)) $null
             Write-Ok "Moved legacy config: $(Split-Path $f -Leaf)"
         }
         Write-Info "Legacy configs in $dest (SYSTEM + Administrators only - may contain the old password)"
@@ -439,7 +442,7 @@ function Install-Config {
     Write-Ok "Main config written to $DcConf"
     Write-Ok "Installer config $PkgConfDir\fluent-bit.conf left untouched"
 
-    # A moved legacy file keeps the ACL of the install directory (Users: read)
+    # Let everything below the data directory inherit its ACL again
     Set-DataDirAcl
 }
 
