@@ -15,6 +15,7 @@
 # Usage:
 #   check-cve            # interactive output
 #   check-cve --fix      # apply mitigations automatically
+#   check-cve --fix --force-ipsec  # also blacklist esp4/esp6 on IPsec hosts
 #   check-cve --json     # machine-readable JSON output
 #
 # Advisories:
@@ -45,15 +46,18 @@ fi
 
 # ── Argument parsing ──────────────────────────────────────────────────────────
 MODE="check"
+FORCE_IPSEC=false
 for arg in "$@"; do
     case "$arg" in
         --fix)  MODE="fix"  ;;
         --json) MODE="json" ;;
+        --force-ipsec) FORCE_IPSEC=true ;;
         -h|--help)
-            echo "Usage: $0 [--fix | --json]"
-            echo "  (no flag)  Interactive security check"
-            echo "  --fix      Apply module-blacklist mitigations"
-            echo "  --json     Output results as JSON"
+            echo "Usage: $0 [--fix [--force-ipsec] | --json]"
+            echo "  (no flag)      Interactive security check"
+            echo "  --fix          Apply module-blacklist mitigations"
+            echo "  --force-ipsec  With --fix: blacklist esp4/esp6 even if IPsec is in use"
+            echo "  --json         Output results as JSON"
             exit 0
             ;;
         *) echo "Unknown option: $arg"; exit 1 ;;
@@ -189,15 +193,27 @@ else
     miss "No Dirty Frag modprobe.d mitigation found (/etc/modprobe.d/dirtyfrag.conf)"
 fi
 
-# IPsec / OpenVPN warning
+# IPsec / OpenVPN detection
+# IPsec (kernel xfrm states, strongSwan, Libreswan) needs esp4/esp6; OpenVPN
+# does not. 'ip xfrm state' requires CAP_NET_ADMIN, so as non-root only the
+# service check applies.
 IPSEC_ACTIVE=false
-if systemctl is-active --quiet 'openvpn*' 2>/dev/null || \
-   systemctl is-active --quiet 'openvpn@*' 2>/dev/null || \
+XFRM_STATES=""
+if command -v ip &>/dev/null; then
+    XFRM_STATES=$(ip xfrm state list 2>/dev/null || true)
+fi
+if [[ -n "$XFRM_STATES" ]] || \
    systemctl is-active --quiet strongswan 2>/dev/null || \
-   (command -v ip &>/dev/null && ip xfrm state list 2>/dev/null | grep -q "src"); then
-    warn "IPsec or OpenVPN detected – disabling esp4/esp6 may break VPN functionality!"
-    info "  OpenVPN (UDP/TLS) does NOT require esp4/esp6 – verify and test after mitigation"
+   systemctl is-active --quiet strongswan-starter 2>/dev/null || \
+   systemctl is-active --quiet strongswan-swanctl 2>/dev/null || \
+   systemctl is-active --quiet ipsec 2>/dev/null; then
+    warn "IPsec in use (xfrm states or strongSwan/Libreswan) – disabling esp4/esp6 breaks IPsec tunnels!"
+    info "  --fix keeps esp4/esp6 loadable unless --force-ipsec is given"
     IPSEC_ACTIVE=true
+fi
+if systemctl is-active --quiet 'openvpn*' 2>/dev/null || \
+   systemctl is-active --quiet 'openvpn@*' 2>/dev/null; then
+    info "OpenVPN detected – OpenVPN (UDP/TLS) does NOT require esp4/esp6"
 fi
 
 JSON_FIELDS[dirtyfrag]="$DIRTYFRAG_STATUS"
@@ -901,38 +917,68 @@ if [[ "$MODE" == "fix" ]]; then
         exit 1
     fi
 
+    # Unload modules, then re-read /proc/modules: rmmod fails silently for
+    # modules in use, so success must not be assumed.
+    # Usage: unload_modules <mod>...   – prints a reboot hint per survivor
+    unload_modules() {
+        local mod
+        for mod in "$@"; do
+            module_loaded "$mod" && { rmmod "$mod" 2>/dev/null || true; }
+        done
+        refresh_modules
+        for mod in "$@"; do
+            if module_loaded "$mod"; then
+                warn "${mod} is still loaded (in use) – reboot required to unload it"
+            fi
+        done
+    }
+
     # Copy Fail mitigation (only effective if module-based, not built-in)
     if [[ "${CF_AEAD:-}" != *"=y"* ]]; then
         echo "install algif_aead /bin/false" > /etc/modprobe.d/disable-algif.conf
-        rmmod algif_aead 2>/dev/null || true
         ok "algif_aead blacklist set (/etc/modprobe.d/disable-algif.conf)"
+        unload_modules algif_aead
     else
         warn "algif_aead is built-in – modprobe.d fix skipped (manual GRUB config required)"
         info "  Add 'initcall_blacklist=algif_aead_init' to GRUB_CMDLINE_LINUX"
         info "  Then run: sudo update-grub && sudo reboot"
     fi
 
-    # Dirty Frag mitigation
-    printf 'install esp4 /bin/false\ninstall esp6 /bin/false\ninstall rxrpc /bin/false\n' \
-        > /etc/modprobe.d/dirtyfrag.conf
-    rmmod esp4 esp6 rxrpc 2>/dev/null || true
-    ok "Dirty Frag modprobe.d blacklist set (/etc/modprobe.d/dirtyfrag.conf)"
+    # Dirty Frag mitigation – esp4/esp6 are needed by IPsec, so they are only
+    # blacklisted on IPsec hosts when explicitly forced; rxrpc always.
+    DF_MODS=(esp4 esp6 rxrpc)
+    if [[ "$IPSEC_ACTIVE" == "true" && "$FORCE_IPSEC" != "true" ]]; then
+        DF_MODS=(rxrpc)
+        warn "IPsec in use – esp4/esp6 NOT blacklisted (would break IPsec tunnels)"
+        info "  Only rxrpc is blacklisted; Dirty Frag/Fragnesia via esp4/esp6 remain open until patched"
+        info "  To blacklist esp4/esp6 anyway: sudo check-cve --fix --force-ipsec"
+    fi
+    DF_CONF=""
+    for mod in "${DF_MODS[@]}"; do
+        DF_CONF+="install ${mod} /bin/false"$'\n'
+    done
+    printf '%s' "$DF_CONF" > /etc/modprobe.d/dirtyfrag.conf
+    ok "Dirty Frag modprobe.d blacklist set for ${DF_MODS[*]} (/etc/modprobe.d/dirtyfrag.conf)"
+    unload_modules "${DF_MODS[@]}"
 
     # Fragnesia mitigation (same modules – create dedicated file for auditability)
     if [[ ! -f /etc/modprobe.d/fragnesia.conf ]]; then
-        printf '# CVE-2026-46300 Fragnesia – same surface as Dirty Frag\n' \
-            > /etc/modprobe.d/fragnesia.conf
-        printf '# Covered by dirtyfrag.conf; this file documents the intent explicitly.\n' \
-            >> /etc/modprobe.d/fragnesia.conf
-        printf 'install esp4 /bin/false\ninstall esp6 /bin/false\ninstall rxrpc /bin/false\n' \
-            >> /etc/modprobe.d/fragnesia.conf
-        ok "Fragnesia dedicated mitigation set (/etc/modprobe.d/fragnesia.conf)"
+        {
+            printf '# CVE-2026-46300 Fragnesia – same surface as Dirty Frag\n'
+            printf '# Covered by dirtyfrag.conf; this file documents the intent explicitly.\n'
+            printf '%s' "$DF_CONF"
+        } > /etc/modprobe.d/fragnesia.conf
+        ok "Fragnesia dedicated mitigation set for ${DF_MODS[*]} (/etc/modprobe.d/fragnesia.conf)"
     else
         ok "Fragnesia mitigation already present (/etc/modprobe.d/fragnesia.conf)"
+        if [[ "$IPSEC_ACTIVE" == "true" && "$FORCE_IPSEC" != "true" ]] && \
+           grep -qsE '^[[:space:]]*install[[:space:]]+esp[46][[:space:]]' /etc/modprobe.d/fragnesia.conf; then
+            warn "/etc/modprobe.d/fragnesia.conf blacklists esp4/esp6 – IPsec will break after reboot"
+        fi
     fi
 
-    if [[ "$IPSEC_ACTIVE" == "true" ]]; then
-        warn "IPsec/VPN detected – esp4/esp6 are now disabled. Verify VPN functionality!"
+    if [[ "$IPSEC_ACTIVE" == "true" && "$FORCE_IPSEC" == "true" ]]; then
+        warn "IPsec in use – esp4/esp6 are now disabled (--force-ipsec). Verify VPN functionality!"
     fi
 
     echo -e "\n${YELLOW}Note: mitigations are active but not a substitute for kernel updates.${RESET}"
