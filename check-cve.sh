@@ -967,7 +967,10 @@ if [[ "$MODE" == "fix" ]]; then
     unload_modules "${DF_MODS[@]}"
 
     # Fragnesia mitigation (same modules – create dedicated file for auditability)
-    if [[ ! -f /etc/modprobe.d/fragnesia.conf ]]; then
+    #     On IPsec hosts without --force-ipsec the file is always rewritten, so
+    #     esp4/esp6 lines left by an earlier --fix do not keep blocking IPsec.
+    if [[ ! -f /etc/modprobe.d/fragnesia.conf ]] || \
+       [[ "$IPSEC_ACTIVE" == "true" && "$FORCE_IPSEC" != "true" ]]; then
         {
             printf '# CVE-2026-46300 Fragnesia – same surface as Dirty Frag\n'
             printf '# Covered by dirtyfrag.conf; this file documents the intent explicitly.\n'
@@ -976,9 +979,16 @@ if [[ "$MODE" == "fix" ]]; then
         ok "Fragnesia dedicated mitigation set for ${DF_MODS[*]} (/etc/modprobe.d/fragnesia.conf)"
     else
         ok "Fragnesia mitigation already present (/etc/modprobe.d/fragnesia.conf)"
-        if [[ "$IPSEC_ACTIVE" == "true" && "$FORCE_IPSEC" != "true" ]] && \
-           grep -qsE '^[[:space:]]*install[[:space:]]+esp[46][[:space:]]' /etc/modprobe.d/fragnesia.conf; then
-            warn "/etc/modprobe.d/fragnesia.conf blacklists esp4/esp6 – IPsec will break after reboot"
+    fi
+
+    # Any other modprobe.d file that still blocks esp4/esp6 takes effect on
+    # the next load attempt, i.e. immediately – not only after a reboot.
+    if [[ "$IPSEC_ACTIVE" == "true" && "$FORCE_IPSEC" != "true" ]]; then
+        ESP_BLOCKERS=$(grep -lsE '^[[:space:]]*(install|blacklist)[[:space:]]+esp[46]([[:space:]]|$)' \
+            /etc/modprobe.d/*.conf || true)
+        if [[ -n "$ESP_BLOCKERS" ]]; then
+            warn "esp4/esp6 are still blocked by other modprobe.d files – IPsec cannot load them:"
+            while read -r f; do info "    $f"; done <<< "$ESP_BLOCKERS"
         fi
     fi
 
