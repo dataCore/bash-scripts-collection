@@ -17,7 +17,10 @@
 #      (inbound only on port 8120, Core's IP and key pinned, no host terminal)
 #   3. Install, enable and (re)start the systemd service "periphery"
 #
-# Run it again to update: only the binary changes, the config stays.
+# Run it again to update: only the binary changes, the config stays. If the
+# installed binary already matches the pinned sha256, nothing is downloaded
+# and the service is only restarted when the config or unit changed (or it
+# is not running).
 # Replaces the upstream setup-periphery.py (unpinned, unverified download).
 #
 # Repository: https://github.com/dataCore/bash-scripts-collection
@@ -75,14 +78,22 @@ fi
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
-echo "Downloading $asset $KOMODO_VERSION"
-curl -fsSL -o "$tmp/periphery" \
-  "https://github.com/moghtech/komodo/releases/download/$KOMODO_VERSION/$asset"
-echo "$sha256  $tmp/periphery" | sha256sum -c --quiet - \
-  || { echo "error: checksum mismatch for $asset $KOMODO_VERSION" >&2; exit 1; }
+# Set when the binary, config or unit changed and the service needs a restart.
+changed=false
 
-systemctl stop periphery 2>/dev/null || true
-install -m 0755 "$tmp/periphery" "$BINARY"
+if [ -f "$BINARY" ] && echo "$sha256  $BINARY" | sha256sum -c --quiet - 2>/dev/null; then
+  echo "$BINARY is already $asset $KOMODO_VERSION (sha256 matches), skipping download"
+else
+  echo "Downloading $asset $KOMODO_VERSION"
+  curl -fsSL -o "$tmp/periphery" \
+    "https://github.com/moghtech/komodo/releases/download/$KOMODO_VERSION/$asset"
+  echo "$sha256  $tmp/periphery" | sha256sum -c --quiet - \
+    || { echo "error: checksum mismatch for $asset $KOMODO_VERSION" >&2; exit 1; }
+
+  systemctl stop periphery 2>/dev/null || true
+  install -m 0755 "$tmp/periphery" "$BINARY"
+  changed=true
+fi
 
 install -d -m 0700 "$ROOT_DIR"
 if [ -f "$CONFIG" ]; then
@@ -90,6 +101,8 @@ if [ -f "$CONFIG" ]; then
 else
   # TOML array from the comma-separated list.
   ips_toml=$(printf '%s' "$core_ips" | sed 's/[[:space:]]//g; s/,/", "/g')
+  # umask in a subshell: it must not leak to the unit file written below.
+  (
   umask 077
   cat >"$CONFIG" <<CONF
 # Komodo Periphery, written by install-dockeradminagent.sh.
@@ -123,10 +136,12 @@ logging.level = "info"
 [secrets]
 # NAME = "value"
 CONF
+  )
   echo "Wrote $CONFIG"
+  changed=true
 fi
 
-cat >"$UNIT" <<UNITFILE
+cat >"$tmp/periphery.service" <<UNITFILE
 [Unit]
 Description=Komodo Periphery (Docker admin agent)
 After=network-online.target docker.service
@@ -141,10 +156,20 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 UNITFILE
+if ! cmp -s "$tmp/periphery.service" "$UNIT"; then
+  install -m 0644 "$tmp/periphery.service" "$UNIT"
+  systemctl daemon-reload
+  changed=true
+fi
 
-systemctl daemon-reload
-systemctl enable --now periphery
-systemctl restart periphery
+# enable only; the restart below is the single start (enable --now plus
+# restart started the service twice on a fresh install).
+systemctl enable --quiet periphery
+if [ "$changed" = true ] || ! systemctl is-active --quiet periphery; then
+  systemctl restart periphery
+else
+  echo "Nothing changed, periphery keeps running"
+fi
 sleep 2
 if ! systemctl is-active --quiet periphery; then
   echo "error: periphery did not start; see journalctl -u periphery" >&2
