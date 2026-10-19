@@ -391,6 +391,20 @@ function Set-ServicePath {
         Write-Ok 'Service path already correct'
     }
     Set-Service -Name $ServiceName -StartupType Automatic
+
+    # Restart a crashed agent (after 1 min, 1 min, then 5 min); the failure
+    # counter resets after a day without crash
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $out  = & sc.exe failure $ServiceName reset= 86400 actions= restart/60000/restart/60000/restart/300000 2>&1 | ForEach-Object { "$_" }
+        $code = $LASTEXITCODE
+    } finally { $ErrorActionPreference = $prev }
+    if ($code -eq 0) {
+        Write-Ok 'Service recovery: restart on failure'
+    } else {
+        Write-Warn "Setting the service recovery failed (sc.exe exit $code): $($out -join ' ')"
+    }
 }
 
 # =============================================================================
