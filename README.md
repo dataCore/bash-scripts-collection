@@ -98,8 +98,8 @@ unverified, as before.
 Enable on a host:
 
 ```bash
-# One line per trusted signer: <email> <public key>
-echo "you@example.ch $(cat pubkeys/<username>.pub)" | sudo tee /etc/datacore-allowed-signers
+# One line per trusted key: <email> <public key> (works for multi-key files)
+sed 's/^/you@example.ch /' pubkeys/<username>.pub | sudo tee /etc/datacore-allowed-signers
 sudo git -C /usr/bin/datacore/bash config gpg.ssh.allowedSignersFile /etc/datacore-allowed-signers
 ```
 
