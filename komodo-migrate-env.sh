@@ -133,9 +133,20 @@ if cmp -s "$CONFIG" "$backup"; then
 fi
 echo "Backup of the previous config: $backup" >&2
 systemctl restart periphery
-# Give a broken config the moment it needs to crash the service
-sleep 3
-if ! systemctl is-active --quiet periphery; then
+# Wait up to ~15 s for the service to settle: active right after the restart
+# does not mean it survives parsing a broken config
+# (it must be seen active 3 times in a row; failed/inactive ends the wait).
+active=0
+for _ in $(seq 1 15); do
+  sleep 1
+  state=$(systemctl is-active periphery || true)
+  case "$state" in
+    active) active=$((active + 1)); [ "$active" -ge 3 ] && break ;;
+    activating|reloading) active=0 ;;
+    *) active=0; break ;;
+  esac
+done
+if [ "$active" -lt 3 ]; then
     echo "error: periphery is not active after the restart; see 'journalctl -u periphery'." >&2
     echo "       Previous config: $backup" >&2
     exit 1
