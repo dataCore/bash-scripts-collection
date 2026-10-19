@@ -49,7 +49,7 @@ bash /usr/bin/datacore/bash/link.sh
 | `update-docker.sh` | `{PROJECT} --auto={y,n,b}` | Updates one Compose project. `--auto` controls the restart: yes, no, or backup first. Warns when the project directory has uncommitted or unpushed changes, and when it is behind its Git remote and should be pulled before the containers are updated. Also warns when an env file (`.env`, `.env.*`, `*.env`, templates excluded) is readable by group/others or tracked by Git. Checks for newer images with HEAD requests on the registry manifest, which Docker Hub does not count against its pull rate limit, and pulls only the services whose image changed. Images from private registries that refuse an anonymous token fall back to a `docker pull` with the host's credentials. A project with the label `datacore.update.ignore=true` on any container (e.g. a Komodo stack with Renovate-pinned versions) is skipped. |
 | `update-docker-all.sh` | | Updates all running Compose projects with `--auto=y`, then prunes unused images. |
 | `update-system.sh` | `[-y]` | Full `dist-upgrade` (finishes an interrupted `dpkg` run first, keeps locally modified conffiles, waits up to 10 min for the apt lock). A failed upgrade exits 1 without cleanup or reboot. With `-y` reboots automatically when required; pending kernel updates are detected on Debian and Proxmox, a kernel pinned with `proxmox-boot-tool kernel pin` is respected. It reboots only once per target kernel (remembered in `/var/lib/datacore/update-system.reboot-target`): if the host still runs another kernel afterwards, it warns instead of rebooting every week. Also updates this collection. |
-| `update-scripts.sh` | | Updates this collection via `git pull`, hard-resetting to `origin/main` on conflict, and re-runs `link.sh`. |
+| `update-scripts.sh` | | Updates this collection: `git fetch origin main` (120 s timeout, on failure the repository stays as it is), then `git reset --hard origin/main`, so local changes are always discarded (it says so when there are any), and re-runs `link.sh`. Optionally verifies the commit signature first, see [Signed updates](#signed-updates). |
 
 ### Security
 
@@ -84,6 +84,39 @@ install-swap                            # swap file, size derived from RAM
 install-log --host log.example.ch --docker
 check-cve
 ```
+
+## Signed updates
+
+`update-scripts` (and with it the weekly `update-system -y`) runs whatever is
+on `origin/main` as root. Signature verification is opt-in per host: as soon
+as `gpg.ssh.allowedSignersFile` is set in the git config of the repository
+(or the system/root git config), `update-scripts` runs
+`git verify-commit origin/main` and leaves the repository unchanged when the
+newest commit is not signed by a listed key. Without the setting it updates
+unverified, as before.
+
+Enable on a host:
+
+```bash
+# One line per trusted signer: <email> <public key>
+echo "you@example.ch $(cat pubkeys/<username>.pub)" | sudo tee /etc/datacore-allowed-signers
+sudo git -C /usr/bin/datacore/bash config gpg.ssh.allowedSignersFile /etc/datacore-allowed-signers
+```
+
+Sign commits with an SSH key (on the machine you commit from):
+
+```bash
+git config --global gpg.format ssh
+git config --global user.signingkey ~/.ssh/id_ed25519.pub
+git config --global commit.gpgsign true
+```
+
+Only the commit at the tip of `main` is checked; it covers the history
+before it through the commit hashes. Merge on your own machine (signed), not
+with the GitHub web UI: a web merge is signed with GitHub's key, which is not
+in the allowed signers file, and the hosts stop updating until the next
+signed commit. Enable the check on a host only after the tip of `main` is
+signed.
 
 ## Cron
 
