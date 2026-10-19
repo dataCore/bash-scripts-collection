@@ -54,12 +54,14 @@ echo "HOSTNAME=${HOSTNAME}"
 echo "CURRENTDATE=${TIMESTAMP}"
 echo "BACKUPDIR=${BACKUPDIR}"
 echo "BACKUPDURATIONDAYS=${BACKUPDURATIONDAYS}"
-# A missing CIFS/NFS mount would otherwise fill the local disk unnoticed
-if ! mountpoint -q "$BACKUPDIR"; then
+# A missing CIFS/NFS mount would otherwise fill the local disk unnoticed.
+# BACKUPDIR may be a subdir of a mount; it must just not live on the root fs.
+BACKUPMOUNT=$(findmnt -n -o TARGET -T "$BACKUPDIR" 2>/dev/null || true)
+if [ -z "$BACKUPMOUNT" ] || [ "$BACKUPMOUNT" == "/" ]; then
     if [ "${ALLOW_UNMOUNTED:-0}" == "1" ]; then
-        echo "⚠️  '${BACKUPDIR}' is not a mount point – writing to the local disk (ALLOW_UNMOUNTED=1)."
+        echo "⚠️  '${BACKUPDIR}' is not on a mounted backup filesystem – writing to the local disk (ALLOW_UNMOUNTED=1)."
     else
-        echo "❌ '${BACKUPDIR}' is not a mount point. Mount it, or set ALLOW_UNMOUNTED=1 to back up to the local disk."
+        echo "❌ '${BACKUPDIR}' is not on a mounted backup filesystem (missing or on '/'). Mount it, or set ALLOW_UNMOUNTED=1 to back up to the local disk."
         exit 1
     fi
 fi
