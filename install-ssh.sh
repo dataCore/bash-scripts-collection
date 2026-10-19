@@ -65,6 +65,7 @@ SUDOERS_DIR="/etc/sudoers.d"
 SSHD_INCLUDE_LINE="Include /etc/ssh/sshd_config.d/*.conf"
 SSHD_BACKUP_ROOT="/etc/ssh/install-ssh-backup"
 SSHD_BACKUP_DIR=""  # set by backup_sshd_config, one directory per run
+SSHD_BACKUP_KEEP=10
 
 # Resolve symlinks so pubkeys/ is found relative to the real script location,
 # not the symlink created by link.sh (e.g. /usr/bin/install-ssh → real path)
@@ -494,6 +495,14 @@ backup_sshd_config() {
         cp -a "$SSHD_CONFIG" "${SSHD_CONFIG}.bak"
     fi
     log "[INFO] sshd config backed up to ${SSHD_BACKUP_DIR}"
+
+    # Keep the newest SSHD_BACKUP_KEEP runs (names sort by time)
+    local old_dirs=()
+    mapfile -t old_dirs < <(find "$SSHD_BACKUP_ROOT" -mindepth 1 -maxdepth 1 -type d -name '[0-9]*-[0-9]*' | sort | head -n "-${SSHD_BACKUP_KEEP}")
+    if [[ ${#old_dirs[@]} -gt 0 ]]; then
+        rm -rf -- "${old_dirs[@]}"
+        log "[INFO] removed ${#old_dirs[@]} old sshd backup(s)"
+    fi
 }
 
 restore_sshd_config() {
