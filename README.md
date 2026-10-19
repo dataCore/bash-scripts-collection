@@ -38,7 +38,7 @@ bash /usr/bin/datacore/bash/link.sh
 | Script | Parameters | Description |
 |---|---|---|
 | `backup-docker.sh` | `{PROJECT} {BACKUPDIR:/mnt/backup/} {DAYS:2}` | Backs up one Docker Compose project: compose configuration, volumes and databases (MariaDB, MySQL, PostgreSQL, MongoDB, GitLab). Database containers are recognised by their exact image name (`mariadb`, `mysql`, `postgres`, `timescale/timescaledb(-ha)`, `postgis/postgis`, `pgvector/pgvector`, `ghcr.io/immich-app/postgres`, `tensorchord/pgvecto-rs`, the `bitnami/` and `linuxserver/` variants, …) and dumped whether their data lives in a named volume or a bind mount; the label `datacore.backup.type=postgres\|mariadb\|mysql\|none` overrides the detection. MariaDB/MySQL dumps use `--single-transaction --routines --events --triggers`; the root password comes from `MYSQL_ROOT_PASSWORD`, `MARIADB_ROOT_PASSWORD`, `DB_ROOT_PASSWORD` or the `*_FILE` variants and is resolved inside the container. PostgreSQL uses `POSTGRES_USER`, default `postgres`. GitLab: the newest `gitlab-backup` archive (then removed from `/mnt/backup-cache/gitlab-backup`) plus `gitlab.rb` and `gitlab-secrets.json` (`.gitlabconfig.tar.gz`). SQL dumps are compressed with `zstd` (all cores, `.sql.zst`) when it is installed, otherwise with `gzip` (`.sql.gz`). A container labelled `datacore.backup.ignore=true` is skipped with all its volumes, one labelled `datacore.backup.stop=true` is stopped while its volumes are tarred. Files are written as `.<name>.part` and renamed when complete. Cleanup deletes files older than `DAYS` but always keeps the newest file of every artefact. A missing password or a failed dump does not stop the other containers, but the run exits with 1; exit 75 means the project has no running containers. For TimescaleDB the dump starts with one comment line per database (`-- backup-docker timescaledb: <db> <version>`), and pg_dump's expected warnings about circular foreign keys in the TimescaleDB catalog are hidden (only counted), so a log monitor does not alert on every run. |
-| `backup-docker-all.sh` | `{BACKUPDIR:/mnt/backup/} {DAYS:2} {PBS_REPO}` | Backs up all running Compose projects, optionally uploading to a Proxmox Backup Server. |
+| `backup-docker-all.sh` | `{BACKUPDIR:/mnt/backup/} {DAYS:2} {PBS_REPO}` | Backs up all running Compose projects, optionally uploading `BACKUPDIR/<hostname>` to a Proxmox Backup Server. Refuses to run when `BACKUPDIR` is not a mount point, unless `ALLOW_UNMOUNTED=1` is set. Shares the lock `/run/lock/datacore-docker.lock` with `update-docker-all` and waits up to 1 h for it. |
 | `restore-docker.sh` | `{BACKUPDIR:/mnt/backup/}` | Interactive restore of a Compose project. Run from the project directory. Restores every type `backup-docker.sh` writes. A PostgreSQL dump is only restored into an empty database (fresh volume), a volume only while no running container uses it. A volume archive is tested and extracted next to the target first; the current volume dir is kept as `<dir>.bak-<timestamp>`, not deleted. Compose files and project name come from the container labels when the project exists, so non-default compose file names work. GitLab: restore the `.gitlabconfig.tar.gz` (secrets) before the `.gitlabbackup.tar`; the script waits until GitLab is healthy. Wait limits: `RESTORE_TIMEOUT` (default 180 s), `RESTORE_GITLAB_TIMEOUT` (default 900 s). TimescaleDB: the image must have the same extension version as the dump (checked against the header, otherwise the restore stops and says which tag to pin); the restore runs between `timescaledb_pre_restore()` and `timescaledb_post_restore()`. Dumps made before 2026-10-13 have no header, the version is then not checked. |
 | `backup-remoteserver.sh` | `<remote-ip> <remote-path>` | Backs up a remote path to a Proxmox Backup Server through an SSH reverse tunnel. Credentials in `/etc/backup-remoteserver.conf`. |
 
@@ -47,7 +47,7 @@ bash /usr/bin/datacore/bash/link.sh
 | Script | Parameters | Description |
 |---|---|---|
 | `update-docker.sh` | `{PROJECT} --auto={y,n,b}` | Updates one Compose project. `--auto` controls the restart: yes, no, or backup first. Warns when the project directory has uncommitted or unpushed changes, and when it is behind its Git remote and should be pulled before the containers are updated. Also warns when an env file (`.env`, `.env.*`, `*.env`, templates excluded) is readable by group/others or tracked by Git. Checks for newer images with HEAD requests on the registry manifest, which Docker Hub does not count against its pull rate limit, and pulls only the services whose image changed. Images from private registries that refuse an anonymous token fall back to a `docker pull` with the host's credentials. A project with the label `datacore.update.ignore=true` on any container (e.g. a Komodo stack with Renovate-pinned versions) is skipped. |
-| `update-docker-all.sh` | | Updates all running Compose projects with `--auto=y`, then prunes unused images. |
+| `update-docker-all.sh` | | Updates all running Compose projects with `--auto=y`, then prunes unused images. Waits up to 1 h for a running `backup-docker-all` (shared lock `/run/lock/datacore-docker.lock`). |
 | `update-system.sh` | `[-y]` | Full `dist-upgrade`. With `-y` reboots automatically when required; pending kernel updates are detected on Debian and Proxmox. Also updates this collection. |
 | `update-scripts.sh` | | Updates this collection via `git pull`, hard-resetting to `origin/main` on conflict, and re-runs `link.sh`. |
 
@@ -93,11 +93,11 @@ PBS_PASSWORD="..."
 PBS_FINGERPRINT="..."
 
 # m   h   dom mon dow   command
-  03  03   *   *   *    mountpoint -q /mnt/backup && backup-docker-all '/mnt/backup' 0 > /var/log/dataCoreBackupScript.log 2>&1
+  03  03   *   *   *    backup-docker-all '/mnt/backup' 0 > /var/log/dataCoreBackupScript.log 2>&1
   03  05   *   *   03   update-system -y > /var/log/dataCoreUpdateScript.log
   43  05   *   *   03   update-docker-all > /var/log/dataCoreUpdateDockerScript.log
 ```
 
-`backup-docker-all` does not check whether `/mnt/backup` is mounted. Without
-`mountpoint -q` a missing CIFS mount makes it write the backup to the local disk
-unnoticed; `2>&1` sends error messages to the log as well.
+`backup-docker-all` exits with an error when `/mnt/backup` is not a mount point,
+so a missing CIFS mount no longer fills the local disk unnoticed (`ALLOW_UNMOUNTED=1`
+for a local backup dir); `2>&1` sends error messages to the log as well.

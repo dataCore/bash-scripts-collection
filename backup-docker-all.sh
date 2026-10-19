@@ -9,15 +9,27 @@
 # HISTORY
 # 2024-04-15 Initial Version
 # 2025-07-14 Redesign with generic backup scripts
+# 2026-10-19 Refuses an unmounted BACKUPDIR, lock shared with update-docker-all,
+#            PBS upload of this host's dir only, skip code 75
 #
 # Usage: backup-docker-all {BACKUPDIR} {BACKUPDURATIONDAYS} {PROXMOXBACKUP}
 # Example: backup-docker-all '/mnt/backup' 2 'root@pam@192.168.1.100:Backup-HDD' > /var/log/itpbackupscript.log
+# Env:     ALLOW_UNMOUNTED=1 – back up even when BACKUPDIR is not a mount point
 #
 # =======================================================================
 # Check if the script is run as root
 if [ "$EUID" -ne 0 ]; then
   echo "Please run this script with sudo or as root."
   exit 1
+fi
+# Backup and update runs must not overlap (an update recreating containers
+# while their volumes are tarred): backup-docker-all and update-docker-all
+# share this lock and wait up to 1 h for each other.
+LOCKFILE=/run/lock/datacore-docker.lock
+exec 9>"$LOCKFILE"
+if ! flock -w 3600 9; then
+    echo "❌ ${LOCKFILE} is still held by another backup/update run after 1 h. Aborting."
+    exit 1
 fi
 # Update scripts
 update-scripts
@@ -42,6 +54,15 @@ echo "HOSTNAME=${HOSTNAME}"
 echo "CURRENTDATE=${TIMESTAMP}"
 echo "BACKUPDIR=${BACKUPDIR}"
 echo "BACKUPDURATIONDAYS=${BACKUPDURATIONDAYS}"
+# A missing CIFS/NFS mount would otherwise fill the local disk unnoticed
+if ! mountpoint -q "$BACKUPDIR"; then
+    if [ "${ALLOW_UNMOUNTED:-0}" == "1" ]; then
+        echo "⚠️  '${BACKUPDIR}' is not a mount point – writing to the local disk (ALLOW_UNMOUNTED=1)."
+    else
+        echo "❌ '${BACKUPDIR}' is not a mount point. Mount it, or set ALLOW_UNMOUNTED=1 to back up to the local disk."
+        exit 1
+    fi
+fi
 # =======================================================================
 ALLCONTAINER=$(docker ps --format '{{.Names}}')
 ALLPROJECTS=$(for i in $ALLCONTAINER; do docker inspect --format '{{ index .Config.Labels "com.docker.compose.project"}}' "$i"; done | sort -u)
@@ -76,9 +97,10 @@ if [ -n "$PBS_REPO" ]; then
     # export PBS_FINGERPRINT="Dein:LXC:Fingerprint:von:vorhin"
     # source ~/.bashrc
 
-    # Archiv: hostname.pxar
+    # Archiv: hostname.pxar – only this host's dir: BACKUPDIR may be a share
+    # that other hosts back up to as well
     proxmox-backup-client backup \
-        "${HOSTNAME}.pxar:${BACKUPDIR}" \
+        "${HOSTNAME}.pxar:${BACKUPDIR}/${HOSTNAME}" \
         --repository "$PBS_REPO" \
         --quiet
 
