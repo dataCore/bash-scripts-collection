@@ -601,93 +601,86 @@ PATCH_DIRTYFRAG="unknown"
 PATCH_FRAGNESIA="unknown"
 PATCH_CIFSWITCH="unknown"
 
-# Get the dpkg version of the running kernel package.
-# Returns the version string (e.g. "6.1.170-1") or empty string.
-_kernel_pkg_version() {
-    local pkgname
-    pkgname=$(dpkg --list 2>/dev/null \
-        | awk '/^ii[[:space:]]+linux-image-'"$(uname -r | sed 's/[+.]/\\&/g')"'/{print $2}' \
-        | head -1)
-    [[ -z "$pkgname" ]] && return
-    dpkg --status "$pkgname" 2>/dev/null | awk '/^Version:/{print $2}'
-}
+# Running kernel package, resolved once via the owner of the kernel image.
+# Matching 'linux-image-$(uname -r)' misses Proxmox (proxmox-kernel-*,
+# pve-kernel-*) and any other naming scheme.
+KPKG_NAME=""
+KPKG_VER=""
+KPKG_FLAVOUR="none"   # debian | proxmox | none (image not owned by a package)
+if command -v dpkg &>/dev/null && [[ -e "/boot/vmlinuz-$(uname -r)" ]]; then
+    KPKG_NAME=$(dpkg -S "/boot/vmlinuz-$(uname -r)" 2>/dev/null \
+        | awk -F': ' '!/^diversion / { split($1, a, ", "); print a[1]; exit }' || true)
+    KPKG_NAME="${KPKG_NAME%%:*}"   # strip :arch qualifier
+fi
+if [[ -n "$KPKG_NAME" ]]; then
+    KPKG_VER=$(dpkg-query -W -f='${Version}' "$KPKG_NAME" 2>/dev/null || true)
+    case "$KPKG_NAME" in
+        proxmox-kernel-*|pve-kernel-*) KPKG_FLAVOUR="proxmox" ;;
+        *)                             KPKG_FLAVOUR="debian" ;;
+    esac
+fi
 
-# Compare installed kernel package version against a known-fixed version.
-# Usage: kernel_version_ge <fixed_version>
-# Returns 0 (true) if installed >= fixed_version, 1 otherwise, 2 if unknown.
-kernel_version_ge() {
-    local fixed="$1"
-    local installed
-    installed=$(_kernel_pkg_version)
-    [[ -z "$installed" ]] && return 2
-    dpkg --compare-versions "$installed" ge "$fixed" && return 0 || return 1
-}
+# Kernel changelog, loaded at most once (local copy first, then a single
+# 'apt-get changelog' which needs network) into a temp file.
+KCHANGELOG=""
+KCHANGELOG_STATE="unloaded"   # unloaded | loaded | unavailable
+cleanup_tmp() { [[ -n "$KCHANGELOG" ]] && rm -f "$KCHANGELOG"; return 0; }
+trap cleanup_tmp EXIT
 
-# Search local changelog files (both .gz variants) for a grep pattern.
-# Returns "patched", "not_patched", or "" (not found in changelog).
-_changelog_grep() {
-    local pkgname="$1" pattern="$2"
-    local doc_dir="/usr/share/doc/${pkgname}"
+_kernel_changelog_load() {
+    [[ "$KCHANGELOG_STATE" != "unloaded" ]] && return 0
+    KCHANGELOG_STATE="unavailable"
+    [[ -z "$KPKG_NAME" ]] && return 0
+    KCHANGELOG=$(mktemp) || { KCHANGELOG=""; return 0; }
+    local doc_dir="/usr/share/doc/${KPKG_NAME}" f
     # Debian kernel: changelog.gz (upstream); Ubuntu kernel: changelog.Debian.gz
     for f in "${doc_dir}/changelog.gz" "${doc_dir}/changelog.Debian.gz"; do
         if [[ -f "$f" ]]; then
-            if zgrep -qiE "$pattern" "$f" 2>/dev/null; then
-                echo "patched"; return
-            else
-                echo "not_patched"; return
-            fi
+            zcat "$f" > "$KCHANGELOG" 2>/dev/null || true
+            break
         fi
     done
-    # No local changelog found – try apt-get changelog (requires network)
-    local cl
-    cl=$(apt-get changelog --no-download-limit "$pkgname" 2>/dev/null || true)
-    if [[ -n "$cl" ]]; then
-        if echo "$cl" | grep -qiE "$pattern"; then
-            echo "patched"
-        else
-            echo "not_patched"
-        fi
+    if [[ ! -s "$KCHANGELOG" ]]; then
+        apt-get changelog --no-download-limit "$KPKG_NAME" > "$KCHANGELOG" 2>/dev/null || true
     fi
+    [[ -s "$KCHANGELOG" ]] && KCHANGELOG_STATE="loaded"
+    return 0
 }
 
 # Main check: version comparison first, changelog as confirmation.
-# Usage: kernel_patch_check <fixed_version_or_"none"> <changelog_pattern>
+# Usage: kernel_patch_check <result_var> <fixed_version_or_"none"> <changelog_pattern>
 # "none" as fixed_version means: no patch available yet for this distro.
+# Result: patched | not_patched | not_tracked | unknown
 kernel_patch_check() {
-    local fixed_ver="$1" pattern="$2"
-    local installed
-    installed=$(_kernel_pkg_version)
+    local -n _result="$1"
+    local fixed_ver="$2" pattern="$3"
 
-    if [[ -z "$installed" ]]; then
-        echo "unknown"; return
+    if [[ -z "$KPKG_VER" ]]; then
+        _result="unknown"; return 0
+    fi
+
+    # Debian/Ubuntu fixed versions do not apply to Proxmox kernel packages
+    if [[ "$KPKG_FLAVOUR" == "proxmox" ]]; then
+        _result="not_tracked"; return 0
     fi
 
     # "none" = explicitly known to be unpatched in all current stable releases
     if [[ "$fixed_ver" == "none" ]]; then
-        echo "not_patched"; return
+        _result="not_patched"; return 0
     fi
 
     # Primary: dpkg version comparison
-    if dpkg --compare-versions "$installed" ge "$fixed_ver" 2>/dev/null; then
-        echo "patched"; return
+    if dpkg --compare-versions "$KPKG_VER" ge "$fixed_ver" 2>/dev/null; then
+        _result="patched"; return 0
     fi
 
     # Secondary: changelog grep (catches backports with unusual version strings)
-    local pkgname
-    pkgname=$(dpkg --list 2>/dev/null \
-        | awk '/^ii[[:space:]]+linux-image-'"$(uname -r | sed 's/[+.]/\\&/g')"'/{print $2}' \
-        | head -1)
-    if [[ -n "$pkgname" ]]; then
-        local clog_result
-        clog_result=$(_changelog_grep "$pkgname" "$pattern")
-        if [[ "$clog_result" == "patched" ]]; then
-            echo "patched"; return
-        elif [[ "$clog_result" == "not_patched" ]]; then
-            echo "not_patched"; return
-        fi
+    _kernel_changelog_load
+    if [[ "$KCHANGELOG_STATE" == "loaded" ]] && grep -qiE "$pattern" "$KCHANGELOG"; then
+        _result="patched"; return 0
     fi
 
-    echo "not_patched"
+    _result="not_patched"
 }
 
 # Select fixed versions based on distro/release
@@ -748,65 +741,48 @@ if [[ "$MODE" != "json" ]]; then
     if [[ -f "/boot/vmlinuz-$(uname -r)" ]]; then
         info "Build date  : $(stat -c '%y' "/boot/vmlinuz-$(uname -r)" | cut -d' ' -f1)"
     fi
-    _kpkgver=$(_kernel_pkg_version)
-    [[ -n "$_kpkgver" ]] && info "Pkg version : ${_kpkgver}"
-    info "Checking patch status (version compare + changelog)..."
+    if [[ -n "$KPKG_VER" ]]; then
+        info "Package     : ${KPKG_NAME} ${KPKG_VER}"
+    else
+        miss "Running kernel image is not owned by a dpkg package – patch status unknown"
+    fi
+    if [[ "$KPKG_FLAVOUR" == "proxmox" ]]; then
+        info "Proxmox kernel – Debian/Ubuntu fixed versions do not apply; patch status is not tracked"
+        info "  → check the Proxmox VE changelog / security advisories for this kernel"
+    else
+        info "Checking patch status (version compare + changelog)..."
+    fi
 fi
 
 # CVE-2026-31431 – Copy Fail
 # Upstream commit: a664bf3d603d
-if [[ -n "$FIXED_COPYFAIL" ]]; then
-    PATCH_COPYFAIL=$(kernel_patch_check "$FIXED_COPYFAIL" \
-        'a664bf3d603d|CVE-2026-31431|algif_aead.*out-of-place|Revert.*algif_aead')
-else
-    PATCH_COPYFAIL=$(kernel_patch_check "none" \
-        'a664bf3d603d|CVE-2026-31431|algif_aead.*out-of-place|Revert.*algif_aead')
-fi
+kernel_patch_check PATCH_COPYFAIL "${FIXED_COPYFAIL:-none}" \
+    'a664bf3d603d|CVE-2026-31431|algif_aead.*out-of-place|Revert.*algif_aead'
 JSON_FIELDS[patch_copyfail]="$PATCH_COPYFAIL"
 
 # CVE-2026-43284/43500 – Dirty Frag
 # Upstream commits: e91c6cb57978 / b29d4a88e8ae
-if [[ -n "$FIXED_DIRTYFRAG" ]]; then
-    PATCH_DIRTYFRAG=$(kernel_patch_check "$FIXED_DIRTYFRAG" \
-        'e91c6cb57978|b29d4a88e8ae|CVE-2026-43284|CVE-2026-43500|esp.*in-place.*paged|rxrpc.*in-place.*paged')
-else
-    PATCH_DIRTYFRAG=$(kernel_patch_check "none" \
-        'e91c6cb57978|b29d4a88e8ae|CVE-2026-43284|CVE-2026-43500|esp.*in-place.*paged|rxrpc.*in-place.*paged')
-fi
+kernel_patch_check PATCH_DIRTYFRAG "${FIXED_DIRTYFRAG:-none}" \
+    'e91c6cb57978|b29d4a88e8ae|CVE-2026-43284|CVE-2026-43500|esp.*in-place.*paged|rxrpc.*in-place.*paged'
 JSON_FIELDS[patch_dirtyfrag]="$PATCH_DIRTYFRAG"
 
 # CVE-2026-46300 – Fragnesia
 # Upstream commit: 3f8a2d1c905b
-if [[ -n "$FIXED_FRAGNESIA" ]]; then
-    PATCH_FRAGNESIA=$(kernel_patch_check "$FIXED_FRAGNESIA" \
-        '3f8a2d1c905b|CVE-2026-46300|shared.frag.*coalescing|skb_try_coalesce.*SKBFL_SHARED_FRAG|preserve.*shared.frag')
-else
-    PATCH_FRAGNESIA=$(kernel_patch_check "none" \
-        '3f8a2d1c905b|CVE-2026-46300|shared.frag.*coalescing|skb_try_coalesce.*SKBFL_SHARED_FRAG|preserve.*shared.frag')
-fi
+kernel_patch_check PATCH_FRAGNESIA "${FIXED_FRAGNESIA:-none}" \
+    '3f8a2d1c905b|CVE-2026-46300|shared.frag.*coalescing|skb_try_coalesce.*SKBFL_SHARED_FRAG|preserve.*shared.frag'
 JSON_FIELDS[patch_fragnesia]="$PATCH_FRAGNESIA"
 
 # CVE-2026-46333 – ptrace mm-NULL bypass
 # Upstream commit: 31e62c2ebbfd
-if [[ -n "$FIXED_PTRACE" ]]; then
-    PATCH_PTRACE=$(kernel_patch_check "$FIXED_PTRACE" \
-        '31e62c2ebbfd|CVE-2026-46333|ptrace.*mm.*NULL|get_dumpable.*CAP_SYS_PTRACE|saner.*dumpable')
-else
-    PATCH_PTRACE=$(kernel_patch_check "none" \
-        '31e62c2ebbfd|CVE-2026-46333|ptrace.*mm.*NULL|get_dumpable.*CAP_SYS_PTRACE|saner.*dumpable')
-fi
+kernel_patch_check PATCH_PTRACE "${FIXED_PTRACE:-none}" \
+    '31e62c2ebbfd|CVE-2026-46333|ptrace.*mm.*NULL|get_dumpable.*CAP_SYS_PTRACE|saner.*dumpable'
 JSON_FIELDS[patch_ptrace]="$PATCH_PTRACE"
 
 # CIFSwitch – kernel fix (cifs.spnego origin validation)
 # Upstream commit: 3da1fdf4efbc
 # Also requires: cifs-utils >= version with safe cifs.upcall (check separately below)
-if [[ -n "${FIXED_CIFSWITCH:-}" ]]; then
-    PATCH_CIFSWITCH=$(kernel_patch_check "$FIXED_CIFSWITCH" \
-        '3da1fdf4efbc|CIFSwitch|cifs.*spnego.*origin|cifs_spnego_key_type.*CAP_NET_ADMIN|validate.*spnego.*description')
-else
-    PATCH_CIFSWITCH=$(kernel_patch_check "none" \
-        '3da1fdf4efbc|CIFSwitch|cifs.*spnego.*origin|cifs_spnego_key_type.*CAP_NET_ADMIN|validate.*spnego.*description')
-fi
+kernel_patch_check PATCH_CIFSWITCH "${FIXED_CIFSWITCH:-none}" \
+    '3da1fdf4efbc|CIFSwitch|cifs.*spnego.*origin|cifs_spnego_key_type.*CAP_NET_ADMIN|validate.*spnego.*description'
 JSON_FIELDS[patch_cifswitch]="$PATCH_CIFSWITCH"
 
 # CIFSwitch also requires a patched cifs-utils (cifs.upcall) package.
@@ -849,8 +825,11 @@ if [[ "$MODE" != "json" ]]; then
             not_patched)
                 warn "${cve}: no kernel fix found in changelog – keep mitigation in place"
                 ;;
+            not_tracked)
+                miss "${cve}: no fixed-version data for ${KPKG_NAME} – patch status not tracked (keep mitigation)"
+                ;;
             unknown)
-                miss "${cve}: changelog not readable – patch status unknown (keep mitigation)"
+                miss "${cve}: kernel package not identified – patch status unknown (keep mitigation)"
                 ;;
         esac
     }
@@ -874,7 +853,8 @@ if [[ "$MODE" != "json" ]]; then
     fi
 
     # Show available kernel updates
-    AVAIL=$(apt list --upgradable 2>/dev/null | grep -i "linux-image" || true)
+    AVAIL=$(apt list --upgradable 2>/dev/null \
+        | grep -iE "^(linux-image|proxmox-kernel|pve-kernel)" || true)
     if [[ -n "$AVAIL" ]]; then
         warn "Newer kernel available via apt – update recommended:"
         echo "$AVAIL" | while read -r line; do info "    $line"; done
