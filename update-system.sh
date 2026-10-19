@@ -148,9 +148,22 @@ else
 fi
 
 # Finish an interrupted dpkg run first, otherwise apt-get refuses to work
-if ! dpkg --configure -a; then
-    echo "Error: dpkg --configure -a failed."
-    exit 1
+# ("dpkg was interrupted"). Only when dpkg --audit reports something; keep
+# local conffiles instead of prompting. dpkg has no lock timeout of its own
+# and apt-get cannot do this step, so retry for up to 10 minutes while
+# unattended-upgrades or another apt run holds the lock.
+if [ -n "$(dpkg --audit)" ]; then
+    echo "Finishing an interrupted dpkg run..."
+    for attempt in $(seq 1 60); do
+        if dpkg --force-confdef --force-confold --configure -a </dev/null; then
+            break
+        fi
+        if [ "$attempt" -eq 60 ]; then
+            echo "Error: dpkg --configure -a failed for 10 minutes."
+            exit 1
+        fi
+        sleep 10
+    done
 fi
 
 # Start update
