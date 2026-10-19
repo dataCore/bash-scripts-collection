@@ -249,14 +249,30 @@ else
 fi
 
 # 3d. Page-cache integrity: check /usr/bin/su against package database
+#     su moved from 'login' to 'util-linux' (Debian >= 10), so the owning
+#     package is resolved via dpkg -S. On usr-merged systems the dpkg database
+#     may record either /usr/bin/su or /bin/su – try both, keep the recorded one.
 if command -v dpkg &>/dev/null; then
-    SU_VERIFY=$(dpkg --verify login 2>/dev/null | grep "usr/bin/su" || true)
-    if [[ -n "$SU_VERIFY" ]]; then
-        warn "/usr/bin/su checksum mismatch – possible page-cache corruption (PoC exploit)!"
-        info "  → dpkg --verify login"
-        FRAGNESIA_STATUS="${FRAGNESIA_STATUS}_su_tampered"
+    SU_PATH=""; SU_PKG=""
+    for p in /usr/bin/su /bin/su; do
+        SU_PKG=$(dpkg -S "$p" 2>/dev/null \
+            | awk -F': ' -v p="$p" '!/^diversion / && $2 == p { split($1, a, ", "); print a[1]; exit }' || true)
+        if [[ -n "$SU_PKG" ]]; then
+            SU_PATH="$p"
+            break
+        fi
+    done
+    if [[ -z "$SU_PKG" ]]; then
+        miss "su is not registered in the dpkg database – integrity check skipped"
     else
-        ok "/usr/bin/su checksum matches package (no evidence of PoC exploit)"
+        SU_VERIFY=$(dpkg --verify "$SU_PKG" 2>/dev/null | awk -v p="$SU_PATH" '$NF == p' || true)
+        if [[ -n "$SU_VERIFY" ]]; then
+            warn "${SU_PATH} checksum mismatch – possible page-cache corruption (PoC exploit)!"
+            info "  → dpkg --verify ${SU_PKG}"
+            FRAGNESIA_STATUS="${FRAGNESIA_STATUS}_su_tampered"
+        else
+            ok "${SU_PATH} checksum matches package ${SU_PKG} (no evidence of PoC exploit)"
+        fi
     fi
 fi
 
