@@ -24,6 +24,22 @@ scripts=(
 
 for entry in "${scripts[@]}"; do
     IFS=":" read -r script linkname <<<"$entry"
-    chmod 755 "$folder/$script"
+    if [ ! -f "$folder/$script" ]; then
+        echo "Skipped $linkname: $folder/$script not found."
+        continue
+    fi
+    # Checked out as 100755 by git; only repair a copy that lost the bit
+    [ -x "$folder/$script" ] || chmod 755 "$folder/$script"
     ln -sf "$folder/$script" "$linkname"
+done
+
+# Remove links into the collection whose script no longer exists
+for link in /usr/bin/*; do
+    { [ -L "$link" ] && [ ! -e "$link" ]; } || continue
+    case "$(readlink "$link")" in
+        "$folder"/*)
+            rm -f "$link"
+            echo "Removed dangling link $link"
+            ;;
+    esac
 done

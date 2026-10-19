@@ -62,7 +62,7 @@ bash /usr/bin/datacore/bash/link.sh
 | Script | Parameters | Description |
 |---|---|---|
 | `show-lastreboot.sh` | | Prints the time of the last reboot. |
-| `link.sh` | | Symlinks all scripts into `/usr/bin/`. Run once after cloning. |
+| `link.sh` | | Symlinks all scripts into `/usr/bin/`, skips missing ones and removes links into the collection whose script is gone. Run once after cloning; `update-scripts` re-runs it. |
 
 ## Data directories
 
