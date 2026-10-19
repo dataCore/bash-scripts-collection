@@ -2,13 +2,15 @@
 # =============================================================================
 # install-mon.sh — dataCore Zabbix Agent2 Installation & Configuration
 # =============================================================================
-# Usage: install-mon.sh <monitoring-server>
+# Usage: install-mon.sh <monitoring-server> [--zabbix-version <X.Y>]
 #
 #   monitoring-server   Hostname/IP of Zabbix Server or Proxy
 #                       e.g. dataCoreMonitor, itpmonitor
+#   --zabbix-version    Zabbix repository release, default: 7.0 (LTS, matches
+#                       our Zabbix server). Only used when the repo is added.
 #
 # What this script does:
-#   1. Install Zabbix Agent2 from official Zabbix repository
+#   1. Install Zabbix Agent2 from the official Zabbix repository (pinned release)
 #   2. Generate a random 256-bit PSK key
 #   3. Write agent drop-in config
 #   4. Add zabbix user to docker group (if Docker is installed)
@@ -31,6 +33,8 @@ ZABBIX_AGENT_CONF="/etc/zabbix/zabbix_agent2.conf"
 ZABBIX_DROP_DIR="/etc/zabbix/zabbix_agent2.d"
 ZABBIX_PSK_FILE="/etc/zabbix/key.psk"
 LOG_FILE="/var/log/datacore-install.log"
+# Agent2 must not be newer than the server; ours runs Zabbix 7.0 LTS.
+ZABBIX_VERSION="7.0"      # overridden by --zabbix-version
 # ZABBIX_CONF_FILE is set after MON_SERVER is known (in check_args)
 
 # =============================================================================
@@ -64,7 +68,8 @@ die()  { err "$1"; echo ""; exit 1; }
 # third-party repository (e.g. a misconfigured Docker repo) is broken — we
 # verify the package we actually need is available before installing.
 apt_update() {
-    local errfile="/tmp/datacore-apt-update.$$"
+    local errfile
+    errfile=$(mktemp)
     if apt-get update -qq 2>"$errfile"; then
         rm -f "$errfile"
         return 0
@@ -82,45 +87,41 @@ apt_update() {
 check_args() {
     print_section "Pre-flight Checks"
 
-    if [[ $# -lt 1 ]]; then
+    if [[ $# -lt 1 || "$1" == --* ]]; then
         echo -e "${RED}${BOLD}Error:${NC} Missing argument."
         echo ""
-        echo -e "  Usage:   ${BOLD}$0 <monitoring-server>${NC}"
+        echo -e "  Usage:   ${BOLD}$0 <monitoring-server> [--zabbix-version <X.Y>]${NC}"
         echo -e "  Example: ${BOLD}$0 dataCoreMonitor${NC}"
-        echo -e "  Example: ${BOLD}$0 itpmonitor${NC}"
+        echo -e "  Example: ${BOLD}$0 itpmonitor --zabbix-version 7.0${NC}"
         echo ""
         exit 1
     fi
 
     MON_SERVER="$1"
+    shift
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --zabbix-version)
+                [[ $# -ge 2 ]] || die "--zabbix-version requires a value (e.g. 7.0)"
+                [[ "$2" =~ ^[0-9]+\.[0-9]+$ ]] || die "Invalid --zabbix-version '$2' (expected X.Y, e.g. 7.0)"
+                ZABBIX_VERSION="$2"; shift 2 ;;
+            *) die "Unknown argument: $1" ;;
+        esac
+    done
+
     AGENT_HOSTNAME=$(hostname -s)
     AGENT_FQDN=$(hostname -f 2>/dev/null || hostname)
     ZABBIX_CONF_FILE="${ZABBIX_DROP_DIR}/${MON_SERVER,,}.conf"
 
     ok "Monitoring server: ${BOLD}${MON_SERVER}${NC}"
     ok "Agent hostname:    ${BOLD}${AGENT_HOSTNAME}${NC}"
+    ok "Zabbix release:    ${BOLD}${ZABBIX_VERSION}${NC}"
 }
 
 # =============================================================================
 # Step 1 — Install Zabbix Repository & Agent2
 # =============================================================================
-
-# Fallback if the latest release cannot be detected from repo.zabbix.com
-ZABBIX_REPO_VERSION="7.2"
-
-detect_zabbix_version() {
-    local latest
-    latest=$(wget -qO- https://repo.zabbix.com/zabbix/ 2>/dev/null \
-        | grep -oE 'href="[0-9]+\.[0-9]+/"' \
-        | grep -oE '[0-9]+\.[0-9]+' \
-        | sort -uV | tail -1) || true
-    if [[ -n "$latest" ]]; then
-        ZABBIX_REPO_VERSION="$latest"
-        info "Latest Zabbix release: ${ZABBIX_REPO_VERSION}"
-    else
-        warn "Could not detect latest Zabbix release — using fallback ${ZABBIX_REPO_VERSION}"
-    fi
-}
 
 # Map an Ubuntu/Debian codename to its version number (used to build repo URLs).
 codename_to_version() {
@@ -189,10 +190,22 @@ detect_os() {
     esac
 }
 
+# The official repo is present if its release package is installed or a source
+# points at repo.zabbix.com. `apt-cache show zabbix-agent2` is not enough: it
+# also succeeds for the (older) distribution package.
+zabbix_repo_configured() {
+    dpkg-query -W -f='${Status}' zabbix-release 2>/dev/null | grep -q '^install ok installed$' \
+        || grep -rqsE '^[^#]*repo\.zabbix\.com' /etc/apt/sources.list /etc/apt/sources.list.d/
+}
+
 ensure_zabbix_repo() {
-    # Skip if repo is already configured
-    if apt-cache show zabbix-agent2 &>/dev/null; then
-        info "Zabbix repository already configured"
+    if zabbix_repo_configured; then
+        local rel
+        rel=$(dpkg-query -W -f='${Version}' zabbix-release 2>/dev/null || true)
+        info "Zabbix repository already configured${rel:+ (zabbix-release ${rel})}"
+        if [[ -n "$rel" && "$rel" != *":${ZABBIX_VERSION}-"* && "$rel" != "${ZABBIX_VERSION}-"* ]]; then
+            warn "Configured repo is not Zabbix ${ZABBIX_VERSION} — keeping it; remove zabbix-release to switch"
+        fi
         return
     fi
 
@@ -206,21 +219,38 @@ ensure_zabbix_repo() {
         DEBIAN_FRONTEND=noninteractive apt-get install -y -qq wget
     fi
 
-    detect_zabbix_version
-    info "Adding Zabbix ${ZABBIX_REPO_VERSION} repository for ${REPO_ID}/${REPO_CODENAME} ..."
+    info "Adding Zabbix ${ZABBIX_VERSION} repository for ${REPO_ID}/${REPO_CODENAME} ..."
 
-    local deb_file="zabbix-release_latest_${ZABBIX_REPO_VERSION}+${REPO_ID}${REPO_VERSION_ID}_all.deb"
-    local deb_url="https://repo.zabbix.com/zabbix/${ZABBIX_REPO_VERSION}/release/${REPO_ID}/pool/main/z/zabbix-release/${deb_file}"
-    local tmp_deb="/tmp/${deb_file}"
+    # repo.zabbix.com layout: up to 7.0 .../<ver>/<os>/pool/..., from 7.2 on
+    # .../<ver>/release/<os>/pool/... — try both, the likely one first.
+    local deb_file="zabbix-release_latest_${ZABBIX_VERSION}+${REPO_ID}${REPO_VERSION_ID}_all.deb"
+    local pool="pool/main/z/zabbix-release/${deb_file}"
+    local base="https://repo.zabbix.com/zabbix/${ZABBIX_VERSION}"
+    local urls=("${base}/${REPO_ID}/${pool}" "${base}/release/${REPO_ID}/${pool}")
+    if [[ "$(printf '%s\n' "$ZABBIX_VERSION" 7.2 | sort -V | head -1)" == "7.2" ]]; then
+        urls=("${urls[1]}" "${urls[0]}")
+    fi
 
-    wget -q -O "${tmp_deb}" "${deb_url}" \
-        || die "Failed to download Zabbix repo package from: ${deb_url}"
+    local tmp_dir url downloaded=""
+    tmp_dir=$(mktemp -d)
+    for url in "${urls[@]}"; do
+        if wget -q --timeout=10 --tries=2 -O "${tmp_dir}/${deb_file}" "$url"; then
+            downloaded="$url"
+            break
+        fi
+    done
+    if [[ -z "$downloaded" ]]; then
+        rm -rf "$tmp_dir"
+        die "Failed to download Zabbix repo package ${deb_file} from:\n  ${urls[0]}\n  ${urls[1]}"
+    fi
 
-    dpkg -i "${tmp_deb}" &>/dev/null \
-        || die "Failed to install Zabbix repo package"
+    if ! dpkg -i "${tmp_dir}/${deb_file}" &>/dev/null; then
+        rm -rf "$tmp_dir"
+        die "Failed to install Zabbix repo package"
+    fi
 
-    rm -f "${tmp_deb}"
-    ok "Zabbix repository added"
+    rm -rf "$tmp_dir"
+    ok "Zabbix repository added (${downloaded})"
 }
 
 step_install_zabbix() {
