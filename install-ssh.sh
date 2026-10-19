@@ -143,7 +143,9 @@ check_username() {
     # Parse optional flags
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --bantime) FAIL2BAN_BANTIME="$2"; shift 2 ;;
+            --bantime)
+                [[ $# -ge 2 && -n "$2" ]] || die "--bantime requires a value (e.g. 30m, 1h)"
+                FAIL2BAN_BANTIME="$2"; shift 2 ;;
             *) warn "Unknown argument: $1"; shift ;;
         esac
     done
@@ -167,7 +169,7 @@ check_username() {
     fi
 
     local key_count
-    key_count=$(grep -c '^ssh-' "$PUBKEY_FILE" 2>/dev/null || echo 0)
+    key_count=$(grep -c '^ssh-' "$PUBKEY_FILE" 2>/dev/null || true)
 
     ok "Target user:   ${BOLD}${TARGET_USER}${NC}  (home: ${TARGET_HOME})"
     ok "Public key:    ${BOLD}${PUBKEY_FILE}${NC}  (${key_count} key(s))"
@@ -287,7 +289,7 @@ step_setup_group() {
         ok "Group '${SSH_GROUP}' created"
     fi
 
-    if id -nG "$TARGET_USER" | grep -qw "$SSH_GROUP"; then
+    if id -nG "$TARGET_USER" | tr ' ' '\n' | grep -qxF "$SSH_GROUP"; then
         ok "User '${TARGET_USER}' is already in group '${SSH_GROUP}'"
     else
         usermod -aG "$SSH_GROUP" "$TARGET_USER"
@@ -338,7 +340,7 @@ step_setup_git() {
     # We run as root, so `git config --global` would target /root/.gitconfig.
     # Write the target user's config explicitly instead, then hand it back.
     git config --file "$gitconfig" credential.helper store
-    chown "${TARGET_USER}:${TARGET_USER}" "$gitconfig"
+    chown "${TARGET_USER}:" "$gitconfig"
     chmod 644 "$gitconfig"
 
     ok "git credential.helper=store set in ${gitconfig}"
@@ -447,8 +449,8 @@ EOF
 
     # fail2ban-server configures jails asynchronously and exits on a bad jail
     # a moment after systemd reports it started — wait for the socket instead.
-    local i
-    for i in {1..10}; do
+    local _
+    for _ in {1..10}; do
         fail2ban-client ping &>/dev/null && break
         sleep 1
     done
@@ -469,7 +471,7 @@ step_pve_root_ssh() {
     print_section "PVE Cluster — Root SSH Between Nodes"
 
     # AllowGroups applies to root as well
-    if id -nG root | grep -qw "$SSH_GROUP"; then
+    if id -nG root | tr ' ' '\n' | grep -qxF "$SSH_GROUP"; then
         ok "root is already in group '${SSH_GROUP}'"
     else
         usermod -aG "$SSH_GROUP" root
@@ -627,10 +629,10 @@ step_install_authorized_keys() {
 
     mkdir -p "$ssh_dir"
     chmod 700 "$ssh_dir"
-    chown "${TARGET_USER}:${TARGET_USER}" "$ssh_dir"
+    chown "${TARGET_USER}:" "$ssh_dir"
     touch "$auth_keys"
     chmod 600 "$auth_keys"
-    chown "${TARGET_USER}:${TARGET_USER}" "$auth_keys"
+    chown "${TARGET_USER}:" "$auth_keys"
 
     # Add each key only if its key material is not already present.
     # Comparison is on the key blob (field 2) only — ignores comment differences.
@@ -652,7 +654,7 @@ step_install_authorized_keys() {
     done < "$PUBKEY_FILE"
 
     local total
-    total=$(grep -c '^ssh-' "$auth_keys" 2>/dev/null || echo 0)
+    total=$(grep -c '^ssh-' "$auth_keys" 2>/dev/null || true)
 
     echo ""
     info "Result: ${added} added, ${skipped} already present, ${total} total → ${auth_keys}"
