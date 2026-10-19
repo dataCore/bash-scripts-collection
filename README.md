@@ -55,7 +55,7 @@ bash /usr/bin/datacore/bash/link.sh
 
 | Script | Parameters | Description |
 |---|---|---|
-| `check-cve.sh` | `[--fix] [--json]` | Checks the host against current kernel and userspace CVEs (Copy Fail, Dirty Frag, Fragnesia, CrackArmor, ptrace mm-NULL, CIFSwitch). `--fix` applies module blacklists and sysctl mitigations, `--json` produces machine-readable output. |
+| `check-cve.sh` | `[--fix [--force-ipsec]] [--json]` | Checks the host against current kernel and userspace CVEs (Copy Fail, Dirty Frag, Fragnesia, CrackArmor, ptrace mm-NULL, CIFSwitch). `--fix` applies module blacklists and sysctl mitigations: esp4/esp6 are skipped while IPsec is in use unless `--force-ipsec` is given, and `unprivileged_userns_clone=0` is only set when cifs-utils is installed. `--json` produces machine-readable output. Proxmox kernels are reported as `not_tracked`, since Debian fixed versions do not apply to them. |
 
 ### Utilities
 
