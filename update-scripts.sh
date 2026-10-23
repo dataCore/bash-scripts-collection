@@ -27,8 +27,9 @@ if [ -n "$(git -C "$REPO" status --porcelain --untracked-files=no)" ] ||
     echo "WARNING: local changes in $REPO are discarded."
 fi
 
-if git -C "$REPO" reset --hard "origin/$BRANCH"; then
-    echo "Repository is at origin/$BRANCH."
+# --quiet: git's own "HEAD is now at ..." line is replaced by the message below
+if git -C "$REPO" reset --quiet --hard "origin/$BRANCH"; then
+    echo "Repository is at origin/$BRANCH ($(git -C "$REPO" log -1 --format='%h %s'))."
 else
     echo "ERROR: git reset --hard origin/$BRANCH failed."
     exit 1

@@ -584,7 +584,7 @@ step_verify() {
     echo ""
     info "Docker info summary:"
     docker info 2>/dev/null | grep -E \
-        'Server Version|Storage Driver|Logging Driver|Cgroup|IPv6|Default Address' \
+        'Server Version|Storage Driver|Logging Driver|Cgroup|IPv6|Default Address|Base:' \
         | sed 's/^/    /'
 }
 

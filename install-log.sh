@@ -383,14 +383,12 @@ detect_fluent_bit_bin() {
 step_install_fluent_bit() {
     print_section "Installing Fluent Bit"
 
+    # The package binary lives in /opt and is not on PATH, so the version is
+    # read from $FB_BIN. Updates are left to update-system, as in install-docker.
     if command -v fluent-bit &>/dev/null || [[ -x /opt/fluent-bit/bin/fluent-bit ]]; then
-        ok "Fluent Bit already installed: $(fluent-bit --version 2>/dev/null | head -1)"
         restore_package_config
-        info "Checking for updates..."
-        apt_update
-        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq fluent-bit
-        ok "Fluent Bit up to date"
         detect_fluent_bit_bin
+        ok "Fluent Bit already installed: $("$FB_BIN" --version 2>/dev/null | head -1) — updates are left to update-system"
         return
     fi
 
@@ -413,8 +411,8 @@ https://packages.fluentbit.io/${REPO_ID}/${REPO_CODENAME} ${REPO_CODENAME} main"
     apt-cache show fluent-bit &>/dev/null \
         || die "fluent-bit is not available — check the Fluent Bit repository above"
     DEBIAN_FRONTEND=noninteractive apt-get install -y -qq fluent-bit
-    ok "Fluent Bit installed: $(fluent-bit --version 2>/dev/null | head -1)"
     detect_fluent_bit_bin
+    ok "Fluent Bit installed: $("$FB_BIN" --version 2>/dev/null | head -1)"
 }
 
 # =============================================================================
