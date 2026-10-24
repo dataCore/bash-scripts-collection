@@ -86,6 +86,10 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+# Accept a pasted URL too: the scripts add https:// themselves, so
+# 'https://log.geek.ch/' would otherwise become 'https://https://log.geek.ch/'.
+$O2Host = ($O2Host.Trim() -replace '^[a-zA-Z]+://', '').TrimEnd('/')
+
 # --------------- Paths --------------------------------------------------------
 $ServiceName = 'fluent-bit'
 $FbDir       = Join-Path $env:ProgramFiles 'fluent-bit'
