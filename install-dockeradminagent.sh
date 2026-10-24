@@ -29,10 +29,10 @@
 set -euo pipefail
 
 # Must match the version of Komodo Core.
-KOMODO_VERSION=v2.3.3
-# sha256 of the release assets (GitHub release v2.3.3, asset digests).
-SHA256_X86_64=40b78f377626799afad8331246a501f077d4ebcfb6d9096894cf55b64f6dcf13
-SHA256_AARCH64=60334780d7115ddc7a35fad062f4c606a4c814ae9a7dd8710ca96a0c1a37d85c
+KOMODO_VERSION=v2.3.4
+# sha256 of the release assets (GitHub release v2.3.4, asset digests).
+SHA256_X86_64=46d50313970aea59d293bbe237648f4becea74e8abc2f30f1bb62b73456fc72e
+SHA256_AARCH64=f49dc4cfab0046563cab9d7f3910e92e083f7742161a8b877bd60e2e74550feb
 
 ROOT_DIR=/etc/komodo
 CONFIG="$ROOT_DIR/periphery.config.toml"
