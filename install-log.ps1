@@ -250,7 +250,7 @@ function Get-Credentials {
         if ($oldUser -and $oldPass) {
             $oldUser = $oldUser.Substring('@SET o2_user='.Length)
             $oldPass = $oldPass.Substring('@SET o2_passwd='.Length)
-            Write-Host "  Use the existing credentials of $oldUser from $SecretsConf? [Y/n] " -NoNewline
+            Write-Host "  Use the existing credentials of $oldUser from $($SecretsConf)? [Y/n] " -NoNewline
             if ((Read-Host) -notmatch '^[nN]') {
                 $script:User = $oldUser
                 $script:Pass = $oldPass
@@ -294,7 +294,7 @@ function Get-Credentials {
         $status = [int]$r.StatusCode
     } catch {
         $status = 0
-        if ($_.Exception.Response) { $status = [int]$_.Exception.Response.StatusCode }
+        if ($_.Exception.PSObject.Properties['Response'] -and $_.Exception.Response) { $status = [int]$_.Exception.Response.StatusCode }
     }
     if ($status -ne 200) { Stop-Script "Credential check failed (HTTP $status). Check -O2Host / user / password." }
     Write-Ok 'Credentials verified successfully'
