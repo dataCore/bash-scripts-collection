@@ -375,6 +375,9 @@ function Write-Configs([string]$Root) {
     storage.sync              normal
     storage.max_chunks_up     128
     storage.backlog.mem_limit 16M
+    # A chunk cut off by a hard stop fails the format check at every start
+    # and is never sent; drop it instead of logging the same error forever.
+    storage.delete_irrecoverable_chunks on
 
 # =============================================================================
 # Host-specific settings
