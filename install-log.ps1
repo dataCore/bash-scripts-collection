@@ -315,6 +315,32 @@ function Initialize-DataDir {
 # =============================================================================
 # Step 4 - Write and Validate the New Config (Staging)
 # =============================================================================
+# winevtlog refuses to start when one of its channels does not exist
+# (error 15007), and --dry-run does not open channels, so the config validates
+# and the service dies on start. That silenced both DCs: File Replication
+# Service is gone where SYSVOL replicates with DFS-R. Copy a source config
+# with only the channels this host has; a missing one is a warning.
+$script:SkippedChannels = @{}
+function Copy-SourceConf([string]$Source, [string]$Target) {
+    $out = foreach ($line in (Get-Content -LiteralPath $Source -Encoding UTF8)) {
+        if ($line -notmatch '^(\s*Channels\s+)(.+)$') { $line; continue }
+        $prefix = $Matches[1]
+        $wanted = $Matches[2].Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+        $present = @($wanted | Where-Object { Get-WinEvent -ListLog $_ -ErrorAction SilentlyContinue })
+        foreach ($missing in ($wanted | Where-Object { $present -notcontains $_ })) {
+            if (-not $script:SkippedChannels.ContainsKey($missing)) {
+                $script:SkippedChannels[$missing] = $true
+                Write-Warn "Event log channel '$missing' does not exist on this host - left out of $(Split-Path $Source -Leaf)"
+            }
+        }
+        if ($present.Count -eq 0) {
+            Stop-Script "None of the channels in $(Split-Path $Source -Leaf) exist on this host ($($wanted -join ', '))."
+        }
+        $prefix + ($present -join ',')
+    }
+    Write-TextFile $Target (($out -join "`r`n") + "`r`n")
+}
+
 # Writes datacore.conf, datacore-secrets.conf and conf.d\ below $Root. Called
 # for the staging directory first and, once that validated, for $DataDir.
 function Write-Configs([string]$Root) {
@@ -333,7 +359,7 @@ function Write-Configs([string]$Root) {
         Write-Info "Removed conf.d\$($_.Name) (not selected)"
     }
     foreach ($f in $includes) {
-        Copy-Item (Join-Path $SourceDir $f) (Join-Path $confDir $f) -Force
+        Copy-SourceConf (Join-Path $SourceDir $f) (Join-Path $confDir $f)
     }
 
     # The service account must be able to read the secrets; LocalSystem is
