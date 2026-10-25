@@ -199,6 +199,10 @@ parse_args() {
         esac
     done
 
+    # Accept a pasted URL too: the script adds https:// itself, so
+    # "https://log.geek.ch/" would otherwise become "https://https://log.geek.ch/".
+    O2_HOST="${O2_HOST#*://}"
+    O2_HOST="${O2_HOST%/}"
     [[ -n "$O2_HOST" ]] || die "Missing required --host <fqdn>. Use --help for usage."
 }
 
