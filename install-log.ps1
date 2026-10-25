@@ -240,6 +240,26 @@ function Get-Network {
 function Get-Credentials {
     Write-Section 'OpenObserve Credentials'
 
+    # A re-run offers the credentials of the current setup, so nobody has to
+    # look up (or mistype) the password again.
+    $fromSecrets = $false
+    if (-not $User -and -not $Pass -and (Test-Path $SecretsConf)) {
+        $lines     = Get-Content -LiteralPath $SecretsConf -Encoding UTF8
+        $oldUser   = ($lines | Where-Object { $_ -like '@SET o2_user=*' }   | Select-Object -First 1)
+        $oldPass   = ($lines | Where-Object { $_ -like '@SET o2_passwd=*' } | Select-Object -First 1)
+        if ($oldUser -and $oldPass) {
+            $oldUser = $oldUser.Substring('@SET o2_user='.Length)
+            $oldPass = $oldPass.Substring('@SET o2_passwd='.Length)
+            Write-Host "  Use the existing credentials of $oldUser from $SecretsConf? [Y/n] " -NoNewline
+            if ((Read-Host) -notmatch '^[nN]') {
+                $script:User = $oldUser
+                $script:Pass = $oldPass
+                $fromSecrets = $true
+                Write-Ok "User: $User (from $SecretsConf)"
+            }
+        }
+    }
+
     # Prompt with Write-Host: the Read-Host prompt text is not shown in every host
     if (-not $User) {
         Write-Host '  OpenObserve user: ' -NoNewline
@@ -253,7 +273,7 @@ function Get-Credentials {
         $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
         try     { $script:Pass = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr) }
         finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
-    } else {
+    } elseif (-not $fromSecrets) {
         Write-Ok 'Password: (from -Pass)'
     }
     if (-not $Pass) { Stop-Script 'Password cannot be empty.' }
