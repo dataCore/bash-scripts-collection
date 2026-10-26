@@ -21,9 +21,12 @@
 #            MYSQL_PWD inside the container, GitLab: newest backup only + config,
 #            artefacts written as .part and renamed, tar "file changed" is a
 #            warning, label datacore.backup.stop=true
+# 2026-10-26 Refuses an unmounted BACKUPDIR like backup-docker-all (also when
+#            called alone), artefacts are written with umask 077
 #
 # Usage:   backup-docker {DOCKERCOMPOSE-PROJECTNAME} {BACKUPDIR} {BACKUPDURATIONDAYS}
 # Example: backup-docker 'datacorecloud' '/mnt/backup' 2 > /var/log/dataCoreBackupScript.log
+# Env:     ALLOW_UNMOUNTED=1 – back up even when BACKUPDIR is not a mount point
 #
 # Exit codes: 0  all artefacts written
 #             1  error, or at least one dump/volume failed or was skipped
@@ -52,6 +55,10 @@ fi
 # both normal exit and error. Attaching it to ERR as well caused the trap to
 # run twice and reported wrong line numbers.
 set -euo pipefail
+
+# Dumps and volume archives hold database contents and secrets: root only
+# (files 600, new directories 700).
+umask 077
 
 # Exit code for "nothing to back up". Not 2: tar, mysqldump and others use 2
 # for real errors, backup-docker-all must not mistake those for a skip.
@@ -300,7 +307,19 @@ if [ -z "$ALLCONTAINER" ]; then
 fi
 
 # --- BACKUP DIRECTORIES ---
-BACKUPDIR="${2:-"/mnt/backup"}/${HOSTNAME}"
+BACKUPROOT="${2:-"/mnt/backup"}"
+# A missing CIFS/NFS mount would otherwise fill the local disk unnoticed.
+# BACKUPROOT may be a subdir of a mount; it must just not live on the root fs.
+BACKUPMOUNT=$(findmnt -n -o TARGET -T "$BACKUPROOT" 2>/dev/null || true)
+if [ -z "$BACKUPMOUNT" ] || [ "$BACKUPMOUNT" == "/" ]; then
+    if [ "${ALLOW_UNMOUNTED:-0}" == "1" ]; then
+        echo "⚠️  '${BACKUPROOT}' is not on a mounted backup filesystem – writing to the local disk (ALLOW_UNMOUNTED=1)."
+    else
+        echo "❌ '${BACKUPROOT}' is not on a mounted backup filesystem (missing or on '/'). Mount it, or set ALLOW_UNMOUNTED=1 to back up to the local disk."
+        exit 1
+    fi
+fi
+BACKUPDIR="${BACKUPROOT}/${HOSTNAME}"
 PROJECTBACKUPDIR="${BACKUPDIR}/${PROJECTNAME}"
 mkdir -p "$PROJECTBACKUPDIR"
 # Small scratch files only (pg_dumpall stderr); artefacts go to .part files
