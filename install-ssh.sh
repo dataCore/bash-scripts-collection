@@ -27,6 +27,10 @@
 #      cluster nodes and nowhere else — PVE needs it for migration,
 #      replication and pvesh calls to another node
 #
+# Idempotent: a file is only written when its content differs, sshd is only
+# reloaded and fail2ban only restarted when their config changed, and an sshd
+# backup is only kept for a run that changed something under /etc/ssh.
+#
 # Repository: https://github.com/dataCore/bash-scripts-collection
 # =============================================================================
 
@@ -68,6 +72,8 @@ SSHD_INCLUDE_LINE="Include /etc/ssh/sshd_config.d/*.conf"
 SSHD_BACKUP_ROOT="/etc/ssh/install-ssh-backup"
 SSHD_BACKUP_DIR=""  # set by backup_sshd_config, one directory per run
 SSHD_BACKUP_KEEP=10
+CHANGES=0           # everything this run changed on the host
+SSHD_CHANGES_BEFORE=0  # CHANGES when the sshd backup was taken
 
 # Resolve symlinks so pubkeys/ is found relative to the real script location,
 # not the symlink created by link.sh (e.g. /usr/bin/install-ssh → real path)
@@ -100,6 +106,26 @@ info() { echo -e "  ${CYAN}ℹ${NC}  $1"; log "[INFO] $1"; }
 warn() { echo -e "  ${YELLOW}⚠${NC}  $1"; log "[WARN] $1"; }
 err()  { echo -e "  ${RED}✗${NC}  $1"; log "[ERR]  $1"; }
 die()  { err "$1"; echo ""; exit 1; }
+
+changed() { (( ++CHANGES )); }
+
+# Write stdin to <file> with <mode>, but only when the content differs.
+# Returns 0 when the file was written, 1 when it was already up to date.
+# The temp file has a dot in its name, so sudoers.d and *.conf includes skip it.
+write_if_changed() {
+    local file="$1" mode="$2" tmp
+    tmp=$(mktemp "${file}.XXXXXX")
+    cat > "$tmp"
+    if [[ -f "$file" ]] && cmp -s "$tmp" "$file"; then
+        rm -f "$tmp"
+        chmod "$mode" "$file"
+        return 1
+    fi
+    chmod "$mode" "$tmp"
+    mv "$tmp" "$file"
+    changed
+    return 0
+}
 
 # =============================================================================
 # Pre-flight Checks
@@ -236,6 +262,7 @@ step_set_timezone() {
         ok "Timezone already set to ${TIMEZONE}"
     else
         timedatectl set-timezone "$TIMEZONE"
+        changed
         ok "Timezone set: ${current} → ${TIMEZONE}"
     fi
 }
@@ -262,6 +289,7 @@ step_install_packages() {
         info "Running apt-get install: ${packages[*]}"
         apt-get update -qq
         DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${packages[@]}"
+        changed
         ok "Packages installed: ${packages[*]}"
     fi
 
@@ -274,6 +302,7 @@ step_install_packages() {
         DEBIAN_FRONTEND=noninteractive apt-get install --reinstall -y -qq \
             -o Dpkg::Options::="--force-confmiss" openssh-server
         if [[ -f "$SSHD_CONFIG" ]]; then
+            changed
             ok "Restored ${SSHD_CONFIG}"
         else
             die "Could not restore ${SSHD_CONFIG}.\n  Reinstall manually: apt-get install --reinstall -o Dpkg::Options::=\"--force-confmiss\" openssh-server"
@@ -297,6 +326,7 @@ step_setup_group() {
         ok "Group '${SSH_GROUP}' already exists"
     else
         groupadd "$SSH_GROUP"
+        changed
         ok "Group '${SSH_GROUP}' created"
     fi
 
@@ -304,6 +334,7 @@ step_setup_group() {
         ok "User '${TARGET_USER}' is already in group '${SSH_GROUP}'"
     else
         usermod -aG "$SSH_GROUP" "$TARGET_USER"
+        changed
         ok "User '${TARGET_USER}' added to group '${SSH_GROUP}'"
     fi
 
@@ -319,20 +350,28 @@ step_setup_sudo() {
     print_section "Sudo Configuration"
 
     local sudoers_file="${SUDOERS_DIR}/10-${TARGET_USER}"
+    local entry="${TARGET_USER} ALL=(ALL) NOPASSWD:ALL"
 
     # Validate sudoers.d exists (it should after sudo install)
     mkdir -p "$SUDOERS_DIR"
     chmod 750 "$SUDOERS_DIR"
 
+    if [[ -f "$sudoers_file" && "$(cat "$sudoers_file")" == "$entry" ]]; then
+        chmod 440 "$sudoers_file"
+        ok "Sudoers entry already present: ${sudoers_file}"
+        return 0
+    fi
+
     # Write sudoers drop-in
-    echo "${TARGET_USER} ALL=(ALL) NOPASSWD:ALL" > "${sudoers_file}.tmp"
+    echo "$entry" > "${sudoers_file}.tmp"
 
     # Validate with visudo before putting it in place
     if visudo -c -f "${sudoers_file}.tmp" &>/dev/null; then
         mv "${sudoers_file}.tmp" "$sudoers_file"
         chmod 440 "$sudoers_file"
-        ok "Sudoers entry created: ${sudoers_file}"
-        ok "${TARGET_USER} ALL=(ALL) NOPASSWD:ALL"
+        changed
+        ok "Sudoers entry written: ${sudoers_file}"
+        ok "$entry"
     else
         rm -f "${sudoers_file}.tmp"
         die "visudo validation failed — sudoers file not written"
@@ -350,11 +389,16 @@ step_setup_git() {
 
     # We run as root, so `git config --global` would target /root/.gitconfig.
     # Write the target user's config explicitly instead, then hand it back.
-    git config --file "$gitconfig" credential.helper store
+    if [[ "$(git config --file "$gitconfig" --get credential.helper 2>/dev/null || true)" == "store" ]]; then
+        ok "git credential.helper=store already set in ${gitconfig}"
+    else
+        git config --file "$gitconfig" credential.helper store
+        changed
+        ok "git credential.helper=store set in ${gitconfig}"
+    fi
     chown "${TARGET_USER}:" "$gitconfig"
     chmod 644 "$gitconfig"
 
-    ok "git credential.helper=store set in ${gitconfig}"
     warn "Credentials will be stored unencrypted in ${TARGET_HOME}/.git-credentials"
 }
 
@@ -369,17 +413,21 @@ step_create_banner() {
     print_section "SSH Login Banner & MOTD"
 
     # --- Pre-auth banner: static warning only ---
-    cat > "$SSHD_BANNER_FILE" <<EOF
+    if write_if_changed "$SSHD_BANNER_FILE" 644 <<EOF
 
   ${TARGET_USER} Infrastructure — Authorized Access Only
   All connections are logged and monitored.
   Unauthorized access is strictly prohibited.
 
 EOF
-    ok "Banner written to ${SSHD_BANNER_FILE}"
+    then
+        ok "Banner written to ${SSHD_BANNER_FILE}"
+    else
+        ok "Banner already up to date: ${SSHD_BANNER_FILE}"
+    fi
 
     # --- MOTD: generated by pam_motd on every login, always current ---
-    cat > "$MOTD_SCRIPT" <<'MOTDSCRIPT'
+    if write_if_changed "$MOTD_SCRIPT" 755 <<'MOTDSCRIPT'
 #!/usr/bin/env bash
 # Written by install-ssh.sh — run by pam_motd (update-motd) on every login.
 
@@ -401,14 +449,18 @@ printf "  Host: %s\n" "$(hostname -f 2>/dev/null || hostname)"
 printf "  IP:   %s\n" "$primary_ip"
 echo ""
 MOTDSCRIPT
-    chmod 755 "$MOTD_SCRIPT"
-    ok "MOTD script written to ${MOTD_SCRIPT}"
+    then
+        ok "MOTD script written to ${MOTD_SCRIPT}"
+    else
+        ok "MOTD script already up to date: ${MOTD_SCRIPT}"
+    fi
 
     # --- Remove the boot-time banner generator of earlier versions ---
     if [[ -f /etc/systemd/system/update-ssh-banner.service ]]; then
         systemctl disable --quiet update-ssh-banner.service 2>/dev/null || true
         rm -f /etc/systemd/system/update-ssh-banner.service
         systemctl daemon-reload
+        changed
         ok "Removed old update-ssh-banner.service"
     fi
     rm -f /usr/local/sbin/update-ssh-banner
@@ -435,9 +487,10 @@ step_configure_fail2ban() {
 
     # Everything goes into [sshd]: a [DEFAULT] section in jail.d would change
     # bantime/findtime/maxretry/ignoreip for every other jail on the host too.
-    cat > "$FAIL2BAN_JAIL" <<EOF
+    # No timestamp in the file: it would make every run a change.
+    if write_if_changed "$FAIL2BAN_JAIL" 644 <<EOF
 # dataCore — fail2ban SSH jail
-# Generated by install-ssh.sh on $(date '+%Y-%m-%d %H:%M:%S')
+# Generated by install-ssh.sh — re-run it instead of editing this file
 
 [sshd]
 enabled  = true
@@ -450,11 +503,15 @@ maxretry = 5
 bantime  = ${FAIL2BAN_BANTIME}
 ${FAIL2BAN_IGNORE_LINE}
 EOF
-
-    systemctl enable --quiet fail2ban
-    systemctl restart fail2ban
-
-    ok "Fail2ban jail configured: 5 attempts → ${FAIL2BAN_BANTIME} ban"
+    then
+        systemctl enable --quiet fail2ban
+        systemctl restart fail2ban
+        ok "Fail2ban jail configured: 5 attempts → ${FAIL2BAN_BANTIME} ban"
+    else
+        systemctl enable --quiet fail2ban
+        systemctl is-active --quiet fail2ban || systemctl start fail2ban
+        ok "Fail2ban jail already up to date: 5 attempts → ${FAIL2BAN_BANTIME} ban"
+    fi
     info "Jail file: ${FAIL2BAN_JAIL}"
 
     # fail2ban-server configures jails asynchronously and exits on a bad jail
@@ -497,8 +554,18 @@ backup_sshd_config() {
         cp -a "$SSHD_CONFIG" "${SSHD_CONFIG}.bak"
     fi
     log "[INFO] sshd config backed up to ${SSHD_BACKUP_DIR}"
+    SSHD_CHANGES_BEFORE=$CHANGES
+}
 
-    # Keep the newest SSHD_BACKUP_KEEP runs (names sort by time)
+# Called once the run is through: a run that changed nothing under /etc/ssh
+# drops its backup, otherwise the newest SSHD_BACKUP_KEEP runs are kept.
+finish_sshd_backup() {
+    if (( CHANGES == SSHD_CHANGES_BEFORE )); then
+        rm -rf -- "$SSHD_BACKUP_DIR"
+        log "[INFO] sshd config unchanged — backup ${SSHD_BACKUP_DIR} dropped"
+        return 0
+    fi
+
     local old_dirs=()
     mapfile -t old_dirs < <(find "$SSHD_BACKUP_ROOT" -mindepth 1 -maxdepth 1 -type d -name '[0-9]*-[0-9]*' | sort | head -n "-${SSHD_BACKUP_KEEP}")
     if [[ ${#old_dirs[@]} -gt 0 ]]; then
@@ -533,16 +600,17 @@ step_pve_root_ssh() {
         ok "root is already in group '${SSH_GROUP}'"
     else
         usermod -aG "$SSH_GROUP" root
+        changed
         ok "root added to group '${SSH_GROUP}'"
     fi
 
     local addr_list
     addr_list=$(IFS=,; echo "${PVE_NODE_ADDRS[*]}")
 
-    cat > "$SSHD_PVE_DROP" <<EOF
+    if write_if_changed "$SSHD_PVE_DROP" 644 <<EOF
 # =============================================================================
 # Proxmox VE cluster — root SSH between nodes
-# Generated by install-ssh.sh on $(date '+%Y-%m-%d %H:%M:%S')
+# Generated by install-ssh.sh — re-run it instead of editing this file
 # =============================================================================
 # PVE needs root SSH between cluster nodes (migration, replication, pvesh for
 # another node). Key only, and only from the node addresses in corosync.conf;
@@ -550,8 +618,11 @@ step_pve_root_ssh() {
 Match Address ${addr_list}
     PermitRootLogin prohibit-password
 EOF
-
-    ok "Root exception written to ${SSHD_PVE_DROP}"
+    then
+        ok "Root exception written to ${SSHD_PVE_DROP}"
+    else
+        ok "Root exception already up to date: ${SSHD_PVE_DROP}"
+    fi
     info "Root SSH allowed (key only) from: ${addr_list}"
 }
 
@@ -680,8 +751,6 @@ step_harden_sshd() {
         die "sshd_config not found at ${SSHD_CONFIG} — openssh-server may not be installed correctly.\n  Try manually: apt-get install --reinstall openssh-server"
     fi
 
-    ok "Backup of this run: ${SSHD_BACKUP_DIR}"
-
     # The Include has to be the first directive: sshd keeps the first value it
     # reads, so an Include at the end lets every sshd_config line override the
     # drop-ins (and would land inside a trailing Match block). Earlier versions
@@ -698,6 +767,7 @@ step_harden_sshd() {
         else
             echo "$SSHD_INCLUDE_LINE" > "$SSHD_CONFIG"
         fi
+        changed
         ok "Include directive placed at the top of ${SSHD_CONFIG}"
     fi
 
@@ -726,10 +796,12 @@ step_harden_sshd() {
         warn "This OpenSSH has no post-quantum key exchange — clients will warn"
     fi
 
-    cat > "$SSHD_HARDENED_DROP" <<EOF
+    # No timestamp in the file: it would make every run a change.
+    local drop_written=0
+    if write_if_changed "$SSHD_HARDENED_DROP" 644 <<EOF; then drop_written=1; fi
 # =============================================================================
 # dataCore Hardened SSH Configuration
-# Generated by install-ssh.sh on $(date '+%Y-%m-%d %H:%M:%S')
+# Generated by install-ssh.sh — re-run it instead of editing this file
 # =============================================================================
 
 # --- Access Control ----------------------------------------------------------
@@ -780,11 +852,16 @@ Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.
 MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com
 EOF
 
-    ok "Hardened config written to ${SSHD_HARDENED_DROP}"
+    if (( drop_written )); then
+        ok "Hardened config written to ${SSHD_HARDENED_DROP}"
+    else
+        ok "Hardened config already up to date: ${SSHD_HARDENED_DROP}"
+    fi
 
     # Earlier versions used 99-*, which lost against every other drop-in
     if [[ -f "$SSHD_HARDENED_DROP_OLD" ]]; then
         rm -f "$SSHD_HARDENED_DROP_OLD"
+        changed
         ok "Removed old ${SSHD_HARDENED_DROP_OLD}"
     fi
 
@@ -792,11 +869,14 @@ EOF
     local sshd_check
     if sshd_check=$(sshd -t 2>&1); then
         ok "sshd config validation passed"
-        if systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null; then
-            ok "SSH service reloaded"
+        if (( CHANGES == SSHD_CHANGES_BEFORE )); then
+            ok "sshd config unchanged — no reload"
+        elif systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null; then
+            ok "SSH service reloaded (backup of this run: ${SSHD_BACKUP_DIR})"
         else
             warn "SSH service reload failed — check: systemctl status ssh"
         fi
+        finish_sshd_backup
     else
         err "sshd config validation FAILED:"
         printf '%s\n' "$sshd_check" | sed 's/^/      /'
@@ -898,6 +978,8 @@ step_install_authorized_keys() {
         fi
     done < "$PUBKEY_FILE"
 
+    (( CHANGES += added )) || true
+
     local total
     total=$(grep -c '^ssh-' "$auth_keys" 2>/dev/null || true)
 
@@ -918,6 +1000,11 @@ step_summary() {
     print_section "Summary"
     echo ""
     echo -e "  ${GREEN}${BOLD}✓ SSH setup complete!${NC}"
+    if (( CHANGES == 0 )); then
+        ok "No change — the host already had this configuration"
+    else
+        info "${CHANGES} change(s) on this host"
+    fi
     echo ""
 
     printf "  ${BOLD}%-28s${NC} %s\n" "Target user:"         "${TARGET_USER}"
