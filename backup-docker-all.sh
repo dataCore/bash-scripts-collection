@@ -11,6 +11,8 @@
 # 2025-07-14 Redesign with generic backup scripts
 # 2026-10-19 Refuses an unmounted BACKUPDIR, lock shared with update-docker-all,
 #            PBS upload of this host's dir only, skip code 75
+# 2026-10-26 backup-docker checks the mount itself; the check here stays so
+#            an unmounted BACKUPDIR aborts once instead of failing every project
 #
 # Usage: backup-docker-all {BACKUPDIR} {BACKUPDURATIONDAYS} {PROXMOXBACKUP}
 # Example: backup-docker-all '/mnt/backup' 2 'root@pam@192.168.1.100:Backup-HDD' > /var/log/itpbackupscript.log
