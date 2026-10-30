@@ -4,34 +4,25 @@
 # Repository: https://github.com/dataCore/bash-scripts-collection
 #
 # Checks for active exposure to:
-#   CVE-2026-31431  "Copy Fail"   – algif_aead kernel module (AF_ALG)
-#   CVE-2026-43284  "Dirty Frag"  – esp4 / esp6 (IPsec/xfrm subsystem)
-#   CVE-2026-43500  "Dirty Frag"  – rxrpc subsystem
-#   CVE-2026-46300  "Fragnesia"   – XFRM ESP-in-TCP (skb_try_coalesce / shared-frag marker)
-#   CVE-2026-23268..23411 "CrackArmor" – AppArmor confused-deputy LPE (kernel + util-linux)
-#   CVE-2026-46333  "ptrace mm-NULL" – ptrace_may_access bypass → SSH key + shadow theft
-#   (pending)       "CIFSwitch"   – CIFS/cifs.spnego key forgery → NSS module injection → root
+#   CVE-2026-98432  IPv4 TCP ireq_opt use-after-free – remote root via a SYN
+#                   with IP options (Record Route / Timestamp), CVSS 9.8
+#
+# Earlier versions checked Copy Fail, Dirty Frag, Fragnesia, CrackArmor,
+# ptrace mm-NULL and CIFSwitch; those are fixed by current kernels and were
+# dropped. Mitigation files they left behind are only listed.
 #
 # Usage:
 #   check-cve            # interactive output
-#   check-cve --fix      # apply mitigations automatically
-#   check-cve --fix --force-ipsec  # also blacklist esp4/esp6 on IPsec hosts
+#   check-cve --fix      # apply mitigations (MPTCP off, drop IPv4 TCP with IP options)
 #   check-cve --json     # machine-readable JSON output
 #
 # Advisories:
-#   https://ubuntu.com/blog/copy-fail-vulnerability-fixes-available
-#   https://www.wiz.io/blog/dirty-frag-linux-kernel-local-privilege-escalation-via-esp-and-rxrpc
-#   https://cert.europa.eu/publications/security-advisories/2026-005/
-#   https://github.com/v12-security/pocs/tree/main/fragnesia
-#   https://almalinux.org/blog/2026-05-13-fragnesia-cve-2026-46300/
-#   https://blog.cloudlinux.com/fragnesia-mitigation-and-kernel-update
-#   https://ubuntu.com/security/vulnerabilities/crackarmor
-#   https://blog.qualys.com/vulnerabilities-threat-research/2026/03/12/crackarmor-critical-apparmor-flaws-enable-local-privilege-escalation-to-root
-#   https://security-tracker.debian.org/tracker/CVE-2026-46333
-#   https://github.com/0xdeadbeefnetwork/ssh-keysign-pwn
-#   https://heyitsas.im/posts/cifswitch/
-#   https://github.com/manizada/CIFSwitch
-#   https://kb.wisc.edu/tcd/161613
+#   https://thehackernews.com/2026/10/linux-kernel-tcp-flaw-with-98-cvss.html
+#   https://security-tracker.debian.org/tracker/CVE-2026-98432
+#   https://ubuntu.com/security/CVE-2026-98432
+#   https://access.redhat.com/security/cve/cve-2026-98432
+#   https://forum.proxmox.com/threads/cve-2026-98432-in-proxmox-ve.187339/
+#   https://getrff.com/blog/cve-2026-98432-linux-tcp-ip-options-block/
 # =============================================================================
 
 set -euo pipefail
@@ -46,20 +37,17 @@ fi
 
 # ── Argument parsing ──────────────────────────────────────────────────────────
 MODE="check"
-FORCE_IPSEC=false
 OPT_FIX=false
 OPT_JSON=false
 for arg in "$@"; do
     case "$arg" in
         --fix)  OPT_FIX=true;  MODE="fix"  ;;
         --json) OPT_JSON=true; MODE="json" ;;
-        --force-ipsec) FORCE_IPSEC=true ;;
         -h|--help)
-            echo "Usage: $0 [--fix [--force-ipsec] | --json]"
-            echo "  (no flag)      Interactive security check"
-            echo "  --fix          Apply module-blacklist mitigations"
-            echo "  --force-ipsec  With --fix: blacklist esp4/esp6 even if IPsec is in use"
-            echo "  --json         Output results as JSON"
+            echo "Usage: $0 [--fix | --json]"
+            echo "  (no flag)  Interactive security check"
+            echo "  --fix      Apply mitigations (MPTCP off, drop IPv4 TCP with IP options)"
+            echo "  --json     Output results as JSON"
             exit 0
             ;;
         *) echo "Unknown option: $arg"; exit 1 ;;
@@ -69,10 +57,6 @@ if [[ "$OPT_FIX" == "true" && "$OPT_JSON" == "true" ]]; then
     echo "Error: --fix and --json cannot be combined" >&2
     exit 1
 fi
-if [[ "$FORCE_IPSEC" == "true" && "$OPT_FIX" != "true" ]]; then
-    echo "Error: --force-ipsec is only valid together with --fix" >&2
-    exit 1
-fi
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 # In JSON mode stdout must carry nothing but the JSON document.
@@ -80,6 +64,7 @@ ok()   { [[ "$MODE" == "json" ]] && return 0; echo -e "  ${GREEN}[OK]${RESET}   
 warn() { [[ "$MODE" == "json" ]] && return 0; echo -e "  ${RED}[WARN]${RESET} $*"; }
 info() { [[ "$MODE" == "json" ]] && return 0; echo -e "  ${CYAN}[INFO]${RESET} $*"; }
 miss() { [[ "$MODE" == "json" ]] && return 0; echo -e "  ${YELLOW}[MISS]${RESET} $*"; }
+section() { [[ "$MODE" == "json" ]] && return 0; echo -e "\n${BOLD}$*${RESET}"; }
 
 # Escape a string for use inside a JSON string literal.
 json_escape() {
@@ -93,20 +78,36 @@ json_escape() {
     printf '%s' "$s" | tr -d '\000-\037'
 }
 
-# Loaded kernel modules, read once from /proc/modules. Matching against a
-# variable avoids `lsmod | grep -q`, which under pipefail reports a match as
-# failure when grep exits early and lsmod dies of SIGPIPE.
-PROC_MODULES=""
-refresh_modules() { PROC_MODULES=$(cat /proc/modules 2>/dev/null || true); }
-module_loaded() { grep -q "^$1 " <<< "$PROC_MODULES"; }
-refresh_modules
+# Read a sysctl from /proc/sys (sysctl itself is in /sbin, often not in PATH).
+# Prints "absent" when the key does not exist on this kernel.
+read_sysctl() {
+    local f="/proc/sys/${1//.//}"
+    if [[ -r "$f" ]]; then cat "$f"; else echo "absent"; fi
+}
 
-# Collect JSON results
-declare -A JSON_FIELDS
+# True when version $1 >= $2 (sort -V, works without dpkg)
+ver_ge() {
+    [[ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -1)" == "$2" ]]
+}
 
-# Detect distro early – needed by both CrackArmor and Patch-Status sections
-_DISTRO_ID=$(grep "^ID=" /etc/os-release 2>/dev/null | cut -d= -f2 | tr -d '"')
-_DISTRO_VER=$(grep "^VERSION_CODENAME=" /etc/os-release 2>/dev/null | cut -d= -f2 | tr -d '"')
+IS_ROOT=false
+[[ "$(id -u)" -eq 0 ]] && IS_ROOT=true
+
+CONTAINER="none"
+if command -v systemd-detect-virt &>/dev/null; then
+    CONTAINER=$(systemd-detect-virt -c 2>/dev/null || true)
+    [[ -z "$CONTAINER" ]] && CONTAINER="none"
+fi
+
+_DISTRO_ID=$(grep "^ID=" /etc/os-release 2>/dev/null | cut -d= -f2 | tr -d '"' || true)
+_DISTRO_VER=$(grep "^VERSION_CODENAME=" /etc/os-release 2>/dev/null | cut -d= -f2 | tr -d '"' || true)
+_DISTRO_LIKE=$(grep "^ID_LIKE=" /etc/os-release 2>/dev/null | cut -d= -f2 | tr -d '"' || true)
+
+# Mitigation installed by --fix
+NFT_TABLE="cve_2026_98432"
+NFT_FILE="/etc/datacore/cve-2026-98432.nft"
+NFT_UNIT="cve-2026-98432-nft.service"
+SYSCTL_FILE="/etc/sysctl.d/99-cve-2026-98432.conf"
 
 # ── Header ────────────────────────────────────────────────────────────────────
 if [[ "$MODE" != "json" ]]; then
@@ -121,544 +122,29 @@ if [[ "$MODE" != "json" ]]; then
     echo -e "${BOLD}------------------------------------------------------------${RESET}"
 fi
 
-# ── CVE-2026-31431 – Copy Fail ────────────────────────────────────────────────
-[[ "$MODE" != "json" ]] && echo -e "\n${BOLD}[1/6] CVE-2026-31431 – \"Copy Fail\" (algif_aead / AF_ALG)${RESET}"
-
-COPYFAIL_STATUS="ok"
-
-# 1a. Module loaded right now?
-if module_loaded algif_aead; then
-    warn "algif_aead is currently LOADED – attack surface active"
-    COPYFAIL_STATUS="vulnerable"
-else
-    ok "algif_aead is not loaded"
-fi
-
-# 1b. Built-in or module in running kernel config?
-KCONF="/boot/config-$(uname -r)"
-if [[ -f "$KCONF" ]]; then
-    CF_AEAD=$(grep "^CONFIG_CRYPTO_USER_API_AEAD" "$KCONF" 2>/dev/null || echo "not_found")
-    case "$CF_AEAD" in
-        *"=y")
-            warn "algif_aead is BUILT-IN (=y) – modprobe.d blacklist has no effect!"
-            info "  → Workaround: add initcall_blacklist=algif_aead_init to GRUB_CMDLINE_LINUX"
-            COPYFAIL_STATUS="vulnerable_builtin"
-            ;;
-        *"=m")
-            info "algif_aead is a module (=m) – modprobe.d blacklist is effective"
-            ;;
-        *)
-            info "CONFIG_CRYPTO_USER_API_AEAD not found in $KCONF"
-            ;;
-    esac
-else
-    info "Kernel config not readable ($KCONF)"
-fi
-
-# 1c. modprobe.d mitigation set?
-if grep -rqs "algif_aead" /etc/modprobe.d/; then
-    ok "modprobe.d mitigation for algif_aead is in place"
-    COPYFAIL_STATUS="${COPYFAIL_STATUS}_mitigated"
-else
-    miss "No modprobe.d mitigation found for algif_aead"
-fi
-
-# 1d. AF_ALG sockets in use?
-#     Count instead of `grep -q`: an early grep exit would SIGPIPE lsof and
-#     turn a match into a pipefail failure. Non-root only sees own processes.
-AFALG_COUNT=0
-if command -v lsof &>/dev/null; then
-    AFALG_COUNT=$(lsof 2>/dev/null | grep -c "AF_ALG" || true)
-fi
-if [[ "${AFALG_COUNT:-0}" -gt 0 ]]; then
-    warn "AF_ALG sockets are active – check which processes are using them:"
-    info "  → lsof | grep AF_ALG"
-else
-    ok "No active AF_ALG sockets"
-fi
-
-JSON_FIELDS[copyfail]="$COPYFAIL_STATUS"
-
-# ── CVE-2026-43284/43500 – Dirty Frag ────────────────────────────────────────
-[[ "$MODE" != "json" ]] && echo -e "\n${BOLD}[2/6] CVE-2026-43284/43500 – \"Dirty Frag\" (esp4 / esp6 / rxrpc)${RESET}"
-
-DIRTYFRAG_STATUS="ok"
-LOADED_MODS=()
-
-for mod in esp4 esp6 rxrpc; do
-    if module_loaded "$mod"; then
-        warn "${mod} is loaded – Dirty Frag attack surface active"
-        LOADED_MODS+=("$mod")
-        DIRTYFRAG_STATUS="vulnerable"
-    else
-        ok "${mod} is not loaded"
-    fi
-done
-
-# Mitigation file present?
-if [[ -f /etc/modprobe.d/dirtyfrag.conf ]]; then
-    ok "/etc/modprobe.d/dirtyfrag.conf mitigation is in place"
-    DIRTYFRAG_STATUS="${DIRTYFRAG_STATUS}_mitigated"
-else
-    miss "No Dirty Frag modprobe.d mitigation found (/etc/modprobe.d/dirtyfrag.conf)"
-fi
-
-# IPsec / OpenVPN detection
-# IPsec (kernel xfrm states, strongSwan, Libreswan) needs esp4/esp6; OpenVPN
-# does not. 'ip xfrm state' requires CAP_NET_ADMIN, so as non-root only the
-# service check applies.
-IPSEC_ACTIVE=false
-XFRM_STATES=""
-if command -v ip &>/dev/null; then
-    XFRM_STATES=$(ip xfrm state list 2>/dev/null || true)
-fi
-if [[ -n "$XFRM_STATES" ]] || \
-   systemctl is-active --quiet strongswan 2>/dev/null || \
-   systemctl is-active --quiet strongswan-starter 2>/dev/null || \
-   systemctl is-active --quiet strongswan-swanctl 2>/dev/null || \
-   systemctl is-active --quiet ipsec 2>/dev/null; then
-    warn "IPsec in use (xfrm states or strongSwan/Libreswan) – disabling esp4/esp6 breaks IPsec tunnels!"
-    info "  --fix keeps esp4/esp6 loadable unless --force-ipsec is given"
-    IPSEC_ACTIVE=true
-fi
-if systemctl is-active --quiet 'openvpn*' 2>/dev/null || \
-   systemctl is-active --quiet 'openvpn@*' 2>/dev/null; then
-    info "OpenVPN detected – OpenVPN (UDP/TLS) does NOT require esp4/esp6"
-fi
-
-JSON_FIELDS[dirtyfrag]="$DIRTYFRAG_STATUS"
-JSON_FIELDS[ipsec_active]="$IPSEC_ACTIVE"
-
-# ── CVE-2026-46300 – Fragnesia ────────────────────────────────────────────────
-# Same attack surface as Dirty Frag (esp4/esp6/rxrpc), separate bug.
-# Root cause: skb_try_coalesce() loses SKBFL_SHARED_FRAG marker → XFRM
-# ESP-in-TCP receive path decrypts AES-GCM in-place over page-cache pages →
-# unprivileged write primitive into read-only files (e.g. /usr/bin/su).
-# PoC achieves root in a single command; no race condition required.
-# Mitigation: identical to Dirty Frag — blacklist esp4/esp6/rxrpc.
-[[ "$MODE" != "json" ]] && echo -e "\n${BOLD}[3/6] CVE-2026-46300 – \"Fragnesia\" (XFRM ESP-in-TCP / skb_try_coalesce)${RESET}"
-
-FRAGNESIA_STATUS="ok"
-
-# 3a. Dirty Frag mitigation file covers Fragnesia too (same modules)
-if [[ -f /etc/modprobe.d/fragnesia.conf ]]; then
-    ok "/etc/modprobe.d/fragnesia.conf present (dedicated Fragnesia mitigation)"
-    FRAGNESIA_STATUS="mitigated_dedicated"
-elif [[ -f /etc/modprobe.d/dirtyfrag.conf ]]; then
-    ok "/etc/modprobe.d/dirtyfrag.conf covers Fragnesia (same modules: esp4/esp6/rxrpc)"
-    FRAGNESIA_STATUS="mitigated_via_dirtyfrag"
-else
-    miss "No modprobe.d mitigation found for Fragnesia"
-    FRAGNESIA_STATUS="not_mitigated"
-fi
-
-# 3b. Check if any of the three modules are still loaded despite mitigation
-FRAGNESIA_LOADED=()
-for mod in esp4 esp6 rxrpc; do
-    if module_loaded "$mod"; then
-        warn "${mod} is loaded – Fragnesia attack surface active!"
-        FRAGNESIA_LOADED+=("$mod")
-        FRAGNESIA_STATUS="vulnerable"
-    fi
-done
-if [[ ${#FRAGNESIA_LOADED[@]} -eq 0 ]]; then
-    ok "No Fragnesia-relevant modules loaded (esp4, esp6, rxrpc)"
-fi
-
-# 3c. ESP-in-TCP ULP activity (Fragnesia-specific trigger path)
-#     Best-effort: the plain socket list never shows the ULP. With -i, ss
-#     prints the ULP name as 'tcp-ulp-<name>' (format string present in
-#     iproute2 ss), but the kernel only reports ULP info to CAP_NET_ADMIN,
-#     so as non-root this check cannot see espintcp sockets at all.
-ESPINTCP_COUNT=0
-if command -v ss &>/dev/null; then
-    ESPINTCP_COUNT=$(ss -tni 2>/dev/null | grep -c "tcp-ulp-espintcp" || true)
-fi
-if [[ "${ESPINTCP_COUNT:-0}" -gt 0 ]]; then
-    warn "espintcp ULP sockets are active (${ESPINTCP_COUNT}) – direct Fragnesia trigger path detected!"
-    info "  → ss -tnip | grep -B1 tcp-ulp-espintcp"
-    FRAGNESIA_STATUS="vulnerable_active"
-elif [[ "$(id -u)" -ne 0 ]]; then
-    miss "espintcp ULP sockets not checked – ULP info requires root"
-else
-    ok "No active espintcp ULP sockets"
-fi
-
-# 3d. Page-cache integrity: check /usr/bin/su against package database
-#     su moved from 'login' to 'util-linux' (Debian >= 10), so the owning
-#     package is resolved via dpkg -S. On usr-merged systems the dpkg database
-#     may record either /usr/bin/su or /bin/su – try both, keep the recorded one.
-if command -v dpkg &>/dev/null; then
-    SU_PATH=""; SU_PKG=""
-    for p in /usr/bin/su /bin/su; do
-        SU_PKG=$(dpkg -S "$p" 2>/dev/null \
-            | awk -F': ' -v p="$p" '!/^diversion / && $2 == p { split($1, a, ", "); print a[1]; exit }' || true)
-        if [[ -n "$SU_PKG" ]]; then
-            SU_PATH="$p"
-            break
-        fi
-    done
-    if [[ -z "$SU_PKG" ]]; then
-        miss "su is not registered in the dpkg database – integrity check skipped"
-    else
-        SU_VERIFY=$(dpkg --verify "$SU_PKG" 2>/dev/null | awk -v p="$SU_PATH" '$NF == p' || true)
-        if [[ -n "$SU_VERIFY" ]]; then
-            warn "${SU_PATH} checksum mismatch – possible page-cache corruption (PoC exploit)!"
-            info "  → dpkg --verify ${SU_PKG}"
-            FRAGNESIA_STATUS="${FRAGNESIA_STATUS}_su_tampered"
-        else
-            ok "${SU_PATH} checksum matches package ${SU_PKG} (no evidence of PoC exploit)"
-        fi
-    fi
-fi
-
-[[ "$MODE" != "json" ]] && info "Advisory: https://almalinux.org/blog/2026-05-13-fragnesia-cve-2026-46300/"
-
-JSON_FIELDS[fragnesia]="$FRAGNESIA_STATUS"
-
-# ── CVE-2026-23268..23411 – CrackArmor ───────────────────────────────────────
-# Nine confused-deputy vulnerabilities in the AppArmor Linux Security Module,
-# discovered by Qualys TRU. An unprivileged user can open AppArmor policy
-# pseudo-files under /sys/kernel/security/apparmor/ and coerce a privileged
-# setuid binary (e.g. su, sudo, Postfix) into writing attacker-controlled data
-# to them, bypassing all permission checks. Combined with kernel-level parser
-# flaws (UAF, OOB reads/writes), this enables:
-#   - Full AppArmor policy management (load/replace/remove profiles)
-#   - Bypass of unprivileged user-namespace restrictions
-#   - Local privilege escalation to root (CVSS 7.8–8.8)
-#   - Container isolation bypass
-#   - KASLR disclosure via out-of-bounds reads
+# ── [1/3] Patch status ────────────────────────────────────────────────────────
+# The race is in the IPv4 TCP handshake: a SYN with IP options (Record Route
+# or Timestamp) stores them in the request; on completion they are handed to
+# the new socket without a copy and freed while another CPU still answers a
+# retransmitted SYN with them. All kernels since 4.4, IPv6 is not affected.
+# Upstream fix e3f33b0a1d89 "ipv4: free inet_opt and ireq_opt after an RCU
+# grace period".
 #
-# Affected: all Linux kernels >= 4.11 where AppArmor is enabled (Ubuntu, Debian, SUSE)
-# NOT affected: RHEL/CentOS/Rocky/AlmaLinux (use SELinux, not AppArmor)
-#
-# Fix requires TWO components:
-#   1. Patched kernel (AppArmor LSM fixes)
-#   2. Patched util-linux / login package (su hardening – closes the deputy path)
-#
-# No modprobe.d-style mitigation exists. Patch is the only reliable fix.
-# Disabling AppArmor entirely would be counterproductive and is NOT recommended.
+# Known fixed versions:
+#   Upstream stable:     5.10.272, 5.15.223, 6.1.190, 6.6.159, 6.12.113,
+#                        6.18.56, 7.2.10, 7.3
+#   Debian 12 bookworm:  linux 6.1.190-1 (DLA-4841-1),
+#                        linux-6.12 6.12.113-1~deb12u1 (DLA-4850-1)
+#   Debian 13 trixie:    linux 6.12.113-1 (DSA-6568-1)
+#   Proxmox 7.0 kernel:  7.0.14-25 – built on Ubuntu-7.0.0-43.43i1, which
+#                        carries the backport (Ubuntu commit 091732b7). Taken
+#                        from the Proxmox forum, not confirmed by Proxmox.
+#   Ubuntu, RHEL:        no fixed kernel as of 2026-10-30 – changelog only
+section "[1/3] CVE-2026-98432 – patch status (IPv4 TCP ireq_opt use-after-free)"
 
-[[ "$MODE" != "json" ]] && echo -e "\n${BOLD}[4/6] CVE-2026-23268..23411 – \"CrackArmor\" (AppArmor / confused-deputy LPE)${RESET}"
+CHANGELOG_PATTERN='CVE-2026-98432|e3f33b0a1d89|free inet_opt and ireq_opt'
 
-CRACKARMOR_STATUS="ok"
-CRACKARMOR_APPARMOR="inactive"
-
-# 4a. Is AppArmor active? (Not affected if disabled or SELinux in use)
-if command -v aa-status &>/dev/null && aa-status --enabled 2>/dev/null; then
-    CRACKARMOR_APPARMOR="active"
-    info "AppArmor is enabled – system is in scope for CrackArmor"
-elif [[ -d /sys/kernel/security/apparmor ]]; then
-    CRACKARMOR_APPARMOR="active"
-    info "AppArmor securityfs present – system is in scope for CrackArmor"
-else
-    ok "AppArmor is not active – system is NOT in scope for CrackArmor"
-    CRACKARMOR_STATUS="not_applicable"
-fi
-
-# 4b. Only run further checks if AppArmor is active
-if [[ "$CRACKARMOR_APPARMOR" == "active" ]]; then
-
-    # 4c. Check if the AppArmor policy interfaces are writable by unprivileged users
-    #     HEURISTIC, unverified: the Qualys advisory shows these files as 0666
-    #     on vulnerable kernels, with the policy-admin check done against the
-    #     writing task. Whether the fix (patch 08/11, "apparmor: fix
-    #     unprivileged local user can do privileged policy management")
-    #     changes the mode or only the credential check is not documented
-    #     there – a patched kernel may still show 0666 (false positive).
-    AA_FS="/sys/kernel/security/apparmor"
-    for iface in .load .replace .remove; do
-        if [[ -e "${AA_FS}/${iface}" ]]; then
-            perms=$(stat -c '%a' "${AA_FS}/${iface}" 2>/dev/null || echo "unknown")
-            if [[ "$perms" == "unknown" ]]; then
-                miss "  ${AA_FS}/${iface}: cannot read permissions"
-            elif (( 8#$perms & 8#022 )); then
-                # world-writable or group-writable bit set (owner bits ignored)
-                warn "  ${AA_FS}/${iface}: permissions ${perms} – world/group-writable (heuristic: matches unpatched kernels, may also appear on patched ones)"
-                CRACKARMOR_STATUS="vulnerable"
-            else
-                ok "  ${AA_FS}/${iface}: permissions ${perms} (write-restricted, heuristic)"
-            fi
-        fi
-    done
-
-    # 4d. Check util-linux / login package version (su hardening)
-    #     Patched versions close the deputy path via su by dropping fd inheritance.
-    #     Known fixed versions:
-    #       Debian 12 bookworm:  util-linux 2.38.1-5+deb12u2 (DSA-XXXX / March 2026)
-    #       Debian 13 trixie:    util-linux 2.41-4
-    #       Ubuntu 24.04 noble:  util-linux 2.39.3-9ubuntu6.2
-    #       Ubuntu 22.04 jammy:  util-linux 2.37.2-4ubuntu3.4
-    ULVER=$(dpkg --status util-linux 2>/dev/null | awk '/^Version:/{print $2}')
-    if [[ -z "$ULVER" ]]; then
-        miss "util-linux package not found – cannot check su hardening"
-    else
-        info "util-linux installed: ${ULVER}"
-        ULFIX=false
-        case "${_DISTRO_ID}:${_DISTRO_VER}" in
-            debian:bookworm) dpkg --compare-versions "$ULVER" ge "2.38.1-5+deb12u2" 2>/dev/null && ULFIX=true ;;
-            debian:trixie|debian:forky) dpkg --compare-versions "$ULVER" ge "2.41-4" 2>/dev/null && ULFIX=true ;;
-            debian:sid|debian:unstable) dpkg --compare-versions "$ULVER" ge "2.41-4" 2>/dev/null && ULFIX=true ;;
-            ubuntu:noble)  dpkg --compare-versions "$ULVER" ge "2.39.3-9ubuntu6.2" 2>/dev/null && ULFIX=true ;;
-            ubuntu:jammy)  dpkg --compare-versions "$ULVER" ge "2.37.2-4ubuntu3.4"  2>/dev/null && ULFIX=true ;;
-            ubuntu:focal)  dpkg --compare-versions "$ULVER" ge "2.34-0.1ubuntu9.6"  2>/dev/null && ULFIX=true ;;
-            *) miss "  Unknown release – cannot verify util-linux fix version" ;;
-        esac
-        if [[ "$ULFIX" == "true" ]]; then
-            ok "util-linux su hardening patch installed (CrackArmor deputy path blocked)"
-        else
-            warn "util-linux su hardening NOT installed – CrackArmor deputy path open"
-            info "  → apt update && apt install util-linux login"
-            [[ "$CRACKARMOR_STATUS" != "vulnerable" ]] && CRACKARMOR_STATUS="partial"
-        fi
-    fi
-
-    # 4e. Check if sudo is patched (Ubuntu-specific – Debian does not ship sudo fixes)
-    if [[ "${_DISTRO_ID}" == "ubuntu" ]] && command -v sudo &>/dev/null; then
-        SUDOVER=$(dpkg --status sudo 2>/dev/null | awk '/^Version:/{print $2}')
-        if [[ -n "$SUDOVER" ]]; then
-            info "sudo installed: ${SUDOVER}"
-            SUDOFIX=false
-            case "${_DISTRO_VER}" in
-                noble)  dpkg --compare-versions "$SUDOVER" ge "1.9.15p5-3ubuntu5.2" 2>/dev/null && SUDOFIX=true ;;
-                jammy)  dpkg --compare-versions "$SUDOVER" ge "1.9.9-1ubuntu2.4"    2>/dev/null && SUDOFIX=true ;;
-                focal)  dpkg --compare-versions "$SUDOVER" ge "1.8.31-1ubuntu1.5"   2>/dev/null && SUDOFIX=true ;;
-            esac
-            if [[ "$SUDOFIX" == "true" ]]; then
-                ok "sudo CrackArmor patch installed"
-            else
-                warn "sudo CrackArmor patch NOT installed"
-                info "  → apt update && apt install sudo"
-                [[ "$CRACKARMOR_STATUS" != "vulnerable" ]] && CRACKARMOR_STATUS="partial"
-            fi
-        fi
-    fi
-
-    [[ "$MODE" != "json" ]] && info "Advisory: https://ubuntu.com/security/vulnerabilities/crackarmor"
-fi
-
-JSON_FIELDS[crackarmor]="$CRACKARMOR_STATUS"
-JSON_FIELDS[crackarmor_apparmor]="$CRACKARMOR_APPARMOR"
-
-# ── CVE-2026-46333 – ptrace mm-NULL bypass ────────────────────────────────────
-# ptrace_may_access() evaluates the 'dumpability' flag even for threads with a
-# NULL mm pointer (kernel threads, zombies). A local unprivileged user can use
-# this together with pidfd_getfd() to inherit open file descriptors from
-# privileged processes (e.g. ssh-keysign, sshd) and exfiltrate:
-#   - SSH host private keys (via ssh-keysign file descriptors)
-#   - /etc/shadow contents
-# Public PoC available: github.com/0xdeadbeefnetwork/ssh-keysign-pwn
-# Fix: commit 31e62c2ebbfd – require CAP_SYS_PTRACE for mm-NULL threads.
-# No modprobe.d mitigation. Patch (kernel update) is the only fix.
-# DSA-6275-1 (bookworm), DSA-6274-1 (trixie), DLA-4587-1 (bullseye).
-[[ "$MODE" != "json" ]] && echo -e "\n${BOLD}[5/6] CVE-2026-46333 – ptrace mm-NULL bypass (ssh-keysign / shadow theft)${RESET}"
-
-PTRACE_STATUS="ok"
-
-# 5a. Check if ssh-keysign is installed (primary attack vector)
-if [[ -f /usr/lib/openssh/ssh-keysign ]] || [[ -f /usr/libexec/openssh/ssh-keysign ]]; then
-    info "ssh-keysign is installed – attack vector present"
-    PTRACE_STATUS="exposed"
-else
-    ok "ssh-keysign not found – primary PoC attack vector not present"
-fi
-
-# 5b. Check if sshd is running (secondary indicator)
-if systemctl is-active --quiet ssh 2>/dev/null || systemctl is-active --quiet sshd 2>/dev/null; then
-    info "sshd is running – SSH host keys are in scope"
-fi
-
-# 5c. Check /etc/shadow readability as indicator of exploit success
-#     (readable by root only; world-readable would indicate compromise)
-if [[ -f /etc/shadow ]]; then
-    SHADOW_PERMS=$(stat -c '%a' /etc/shadow 2>/dev/null || echo "unknown")
-    if [[ "$SHADOW_PERMS" =~ ^[0-9]*[1-7]$ ]]; then
-        warn "/etc/shadow has unexpected permissions (${SHADOW_PERMS}) – possible tampering!"
-    else
-        ok "/etc/shadow permissions look correct (${SHADOW_PERMS})"
-    fi
-fi
-
-[[ "$MODE" != "json" ]] && info "PoC: https://github.com/0xdeadbeefnetwork/ssh-keysign-pwn"
-[[ "$MODE" != "json" ]] && info "DSA: https://security-tracker.debian.org/tracker/CVE-2026-46333"
-
-JSON_FIELDS[ptrace_mmnull]="$PTRACE_STATUS"
-
-# ── CIFSwitch – CIFS/cifs.spnego key forgery ─────────────────────────────────
-# Disclosed 2026-05-28 by Asim Manizada (SpaceX). CVE pending.
-# A logic flaw between kernel CIFS and the userspace cifs-utils helper:
-#   The cifs.spnego key type does not validate that the key description
-#   originates from kernel CIFS. An attacker can call request_key() with
-#   a forged description, causing the root-privileged cifs.upcall helper
-#   to switch into an attacker-controlled mount namespace, trigger an NSS
-#   lookup before privilege drop, and load a malicious libnss_*.so.2 →
-#   arbitrary code execution as root. No race condition required.
-#
-# Requirements for exploitation (ALL must be true):
-#   1. cifs.ko kernel module loaded
-#   2. cifs-utils package installed (provides /usr/sbin/cifs.upcall)
-#   3. Unprivileged user namespaces enabled (kernel.unprivileged_userns_clone=1)
-#
-# Known affected: Ubuntu 20.04/22.04/24.04, Debian 11/12/13, SUSE Leap 15.x
-# NOT affected: RHEL/CentOS/Rocky/AlmaLinux (cifs.upcall not present by default)
-#
-# Mitigations (in order of preference):
-#   1. Kernel + cifs-utils package update (upstream patch: commit 3da1fdf4efbc)
-#   2. Disable unprivileged user namespaces (sysctl kernel.unprivileged_userns_clone=0)
-#   3. Remove cifs-utils if Kerberos CIFS mounts not required
-#
-# Advisory: https://heyitsas.im/posts/cifswitch/
-# PoC:      https://github.com/manizada/CIFSwitch
-
-[[ "$MODE" != "json" ]] && echo -e "\n${BOLD}[6/6] CIFSwitch (pending CVE) – CIFS/cifs.spnego key forgery → root${RESET}"
-
-CIFSWITCH_STATUS="ok"
-
-# 6a. Is cifs.ko loaded?
-CIFS_LOADED=false
-if module_loaded cifs; then
-    warn "cifs module is LOADED – kernel attack surface present"
-    CIFS_LOADED=true
-    CIFSWITCH_STATUS="cifs_loaded"
-else
-    ok "cifs module is not loaded"
-fi
-
-# 6b. Is cifs.upcall (from cifs-utils) installed?
-CIFSUTILS_INSTALLED=false
-CIFS_UPCALL=""
-for p in /usr/sbin/cifs.upcall /sbin/cifs.upcall; do
-    if [[ -f "$p" ]]; then
-        CIFS_UPCALL="$p"
-        CIFSUTILS_INSTALLED=true
-        break
-    fi
-done
-
-if [[ "$CIFSUTILS_INSTALLED" == "true" ]]; then
-    warn "cifs.upcall found at ${CIFS_UPCALL} – root-privileged helper is present"
-    CIFSWITCH_STATUS="${CIFSWITCH_STATUS}+upcall"
-    # Show installed version for awareness
-    CIFSU_VER=$(dpkg --status cifs-utils 2>/dev/null | awk '/^Version:/{print $2}' || true)
-    [[ -n "$CIFSU_VER" ]] && info "cifs-utils version: ${CIFSU_VER}"
-else
-    ok "cifs.upcall not found – root-privileged helper absent (not exploitable)"
-fi
-
-# 6c. Unprivileged user namespaces enabled?
-#     kernel.unprivileged_userns_clone is a Debian/Ubuntu kernel patch. Other
-#     kernels only have user.max_user_namespaces (0 = no new user namespaces).
-USERNS_ENABLED=false
-USERNS_SYSCTL="kernel.unprivileged_userns_clone"
-USERNS_VAL=$(sysctl -n kernel.unprivileged_userns_clone 2>/dev/null || \
-             cat /proc/sys/kernel/unprivileged_userns_clone 2>/dev/null || echo "unknown")
-USERNS_SHOWN="$USERNS_VAL"
-if [[ "$USERNS_VAL" == "unknown" ]]; then
-    MAXNS=$(sysctl -n user.max_user_namespaces 2>/dev/null || \
-            cat /proc/sys/user/max_user_namespaces 2>/dev/null || echo "unknown")
-    if [[ "$MAXNS" =~ ^[0-9]+$ ]]; then
-        USERNS_SYSCTL="user.max_user_namespaces"
-        USERNS_SHOWN="$MAXNS"
-        if (( MAXNS > 0 )); then USERNS_VAL=1; else USERNS_VAL=0; fi
-    fi
-fi
-if [[ "$USERNS_VAL" == "1" ]]; then
-    warn "${USERNS_SYSCTL}=${USERNS_SHOWN} – namespace switch attack path OPEN"
-    USERNS_ENABLED=true
-    CIFSWITCH_STATUS="${CIFSWITCH_STATUS}+userns"
-elif [[ "$USERNS_VAL" == "0" ]]; then
-    ok "${USERNS_SYSCTL}=0 – namespace attack path BLOCKED"
-    CIFSWITCH_STATUS="${CIFSWITCH_STATUS}_userns_blocked"
-else
-    miss "Neither kernel.unprivileged_userns_clone nor user.max_user_namespaces readable"
-fi
-
-# 6d. Full exploitability summary
-if [[ "$CIFS_LOADED" == "true" && "$CIFSUTILS_INSTALLED" == "true" && "$USERNS_ENABLED" == "true" ]]; then
-    warn "ALL THREE conditions met – system is FULLY EXPOSED to CIFSwitch!"
-    warn "  Apply mitigation immediately: sudo check-cve --fix"
-    CIFSWITCH_STATUS="VULNERABLE"
-elif [[ "$CIFSUTILS_INSTALLED" == "true" && "$USERNS_ENABLED" == "true" && "$CIFS_LOADED" == "false" ]]; then
-    warn "cifs.upcall + userns present – exploitable if cifs module is loaded (e.g. via mount)"
-    info "  → cifs module auto-loads on 'mount -t cifs'; mitigation recommended"
-    CIFSWITCH_STATUS="at_risk_on_mount"
-elif [[ "$CIFSWITCH_STATUS" == "ok" ]]; then
-    ok "No exploitable CIFSwitch condition detected"
-fi
-
-# 6e. Active CIFS mounts (informational)
-ACTIVE_CIFS=$(mount 2>/dev/null | grep -c "type cifs" || true)
-if [[ "$ACTIVE_CIFS" -gt 0 ]]; then
-    info "Active CIFS mounts: ${ACTIVE_CIFS} – cifs module will remain loaded"
-    if [[ "$MODE" != "json" ]]; then
-        mount 2>/dev/null | grep "type cifs" | awk '{print "    "$0}' || true
-    fi
-fi
-
-# 6f. Check if sysctl mitigation is already persisted
-if grep -rqsE "^[[:space:]]*${USERNS_SYSCTL//./[./]}[[:space:]]*=[[:space:]]*0[[:space:]]*$" \
-        /etc/sysctl.d/ /etc/sysctl.conf; then
-    ok "${USERNS_SYSCTL}=0 is persisted in sysctl.d"
-else
-    if [[ "$USERNS_ENABLED" == "true" ]]; then
-        miss "No persistent sysctl mitigation found for ${USERNS_SYSCTL}"
-    fi
-fi
-
-[[ "$MODE" != "json" ]] && info "Advisory: https://heyitsas.im/posts/cifswitch/"
-
-JSON_FIELDS[cifswitch]="$CIFSWITCH_STATUS"
-JSON_FIELDS[cifswitch_userns]="$USERNS_ENABLED"
-JSON_FIELDS[cifswitch_upcall]="$CIFSUTILS_INSTALLED"
-
-# Strategy (Debian/Ubuntu):
-#
-# 1. Version comparison against known-fixed package versions (primary, no network).
-#    Debian uses dpkg version strings (e.g. 6.1.170-1), Ubuntu uses ABI strings
-#    (e.g. 6.8.0-60.62). dpkg --compare-versions handles both correctly.
-#
-# 2. zgrep on the local changelog as confirmation/fallback:
-#    - Debian kernel packages ship changelog.gz (upstream), NOT changelog.Debian.gz
-#    - Ubuntu kernel packages ship changelog.Debian.gz
-#    Both are tried.
-#
-# Known fixed versions (Debian stable / Ubuntu LTS):
-#   CVE-2026-31431 (Copy Fail):
-#     Debian 12 bookworm:  linux 6.1.170-1   (DSA-XXXX)
-#     Debian 13 trixie:    linux 6.12.85-1
-#     Ubuntu 24.04 noble:  linux 6.8.0-60.62
-#     Ubuntu 22.04 jammy:  linux 5.15.0-140.150
-#
-#   CVE-2026-43284/43500 (Dirty Frag):
-#     Debian bookworm:     NOT YET PATCHED in stable (only sid: 7.0.4-1)
-#     Debian trixie:       NOT YET PATCHED in stable
-#     Ubuntu 24.04:        NOT YET PATCHED
-#
-#   CVE-2026-46300 (Fragnesia):
-#     Debian bookworm:     NOT YET PATCHED (disclosed today)
-#     Ubuntu all releases: NOT YET PATCHED (tracker: "needs evaluation")
-#
-#   CVE-2026-23268..23411 (CrackArmor):
-#     Kernel fix committed upstream (7.0-rc4); check done via apparmor fs
-#     permissions and util-linux/sudo package version – see section [4/5].
-#
-#   CVE-2026-46333 (ptrace mm-NULL):
-#     Debian 12 bookworm:  linux 6.1.172-1   (DSA-6275-1)
-#     Debian 13 trixie:    linux 6.12.88-1   (DSA-6274-1)
-#     Debian 11 bullseye:  linux 5.10.251-5  (DLA-4587-1)
-#     Ubuntu 24.04 noble:  linux 6.8.0-63.66 (USN-XXXX)
-#     Ubuntu 22.04 jammy:  linux 5.15.0-142.152
-#
-# Sources: security-tracker.debian.org, ubuntu.com/security, ostechnix.com
-
-PATCH_COPYFAIL="unknown"
-PATCH_DIRTYFRAG="unknown"
-PATCH_FRAGNESIA="unknown"
-PATCH_CIFSWITCH="unknown"
-
-# Running kernel package, resolved once via the owner of the kernel image.
-# Matching 'linux-image-$(uname -r)' misses Proxmox (proxmox-kernel-*,
-# pve-kernel-*) and any other naming scheme.
+# Running kernel package, resolved via the owner of the kernel image.
 KPKG_NAME=""
 KPKG_VER=""
 KPKG_FLAVOUR="none"   # debian | proxmox | none (image not owned by a package)
@@ -702,426 +188,368 @@ _kernel_changelog_load() {
     return 0
 }
 
-# Main check: version comparison first, changelog as confirmation.
-# Usage: kernel_patch_check <result_var> <fixed_version_or_"none"> <changelog_pattern>
-# "none" as fixed_version means: no patch available yet for this distro.
-# Result: patched | not_patched | not_tracked | unknown
-kernel_patch_check() {
-    local -n _result="$1"
-    local fixed_ver="$2" pattern="$3"
-
-    if [[ -z "$KPKG_VER" ]]; then
-        _result="unknown"; return 0
-    fi
-
-    # Debian/Ubuntu fixed versions do not apply to Proxmox kernel packages
-    if [[ "$KPKG_FLAVOUR" == "proxmox" ]]; then
-        _result="not_tracked"; return 0
-    fi
-
-    # "none" = explicitly known to be unpatched in all current stable releases
-    if [[ "$fixed_ver" == "none" ]]; then
-        _result="not_patched"; return 0
-    fi
-
-    # Primary: dpkg version comparison
-    if dpkg --compare-versions "$KPKG_VER" ge "$fixed_ver" 2>/dev/null; then
-        _result="patched"; return 0
-    fi
-
-    # Secondary: changelog grep (catches backports with unusual version strings)
-    _kernel_changelog_load
-    if [[ "$KCHANGELOG_STATE" == "loaded" ]] && grep -qiE "$pattern" "$KCHANGELOG"; then
-        _result="patched"; return 0
-    fi
-
-    _result="not_patched"
+# Fixed version for the running kernel package, empty when unknown
+fixed_version() {
+    case "$KPKG_FLAVOUR" in
+        proxmox)
+            case "$KPKG_NAME" in
+                proxmox-kernel-7.0.*) echo "7.0.14-25" ;;
+            esac
+            ;;
+        debian)
+            case "${_DISTRO_ID}:${_DISTRO_VER}" in
+                debian:bookworm)
+                    case "$KPKG_VER" in
+                        6.12.*) echo "6.12.113-1~deb12u1" ;;
+                        6.1.*)  echo "6.1.190-1" ;;
+                    esac
+                    ;;
+                debian:trixie)
+                    case "$KPKG_VER" in
+                        6.12.*) echo "6.12.113-1" ;;
+                    esac
+                    ;;
+            esac
+            ;;
+    esac
 }
 
-# Select fixed versions based on distro/release
-case "${_DISTRO_ID}:${_DISTRO_VER}" in
-    debian:bookworm)
-        FIXED_COPYFAIL="6.1.170-1"
-        FIXED_DIRTYFRAG="none"
-        FIXED_FRAGNESIA="none"
-        FIXED_PTRACE="6.1.172-1"    # DSA-6275-1
-        FIXED_CIFSWITCH="6.1.173-1" # cifs.spnego origin validation; cifs-utils >= 7.0-1+deb12u2
+# First fixed upstream stable release for the branch of version $1
+upstream_fixed() {
+    case "$(cut -d. -f1,2 <<< "$1")" in
+        5.10) echo "5.10.272" ;;
+        5.15) echo "5.15.223" ;;
+        6.1)  echo "6.1.190" ;;
+        6.6)  echo "6.6.159" ;;
+        6.12) echo "6.12.113" ;;
+        6.18) echo "6.18.56" ;;
+        7.2)  echo "7.2.10" ;;
+    esac
+}
+
+# Result: patched | not_patched | not_tracked | unknown
+PATCH_STATUS="unknown"
+FIXED_VER=""
+if [[ -n "$KPKG_VER" ]]; then
+    FIXED_VER=$(fixed_version)
+    if [[ -n "$FIXED_VER" ]] && dpkg --compare-versions "$KPKG_VER" ge "$FIXED_VER" 2>/dev/null; then
+        PATCH_STATUS="patched"
+    else
+        # Changelog catches backports with unusual version strings and
+        # releases fixed after this script was written (Ubuntu lists CVE ids)
+        _kernel_changelog_load
+        if [[ "$KCHANGELOG_STATE" == "loaded" ]] && grep -qiE "$CHANGELOG_PATTERN" "$KCHANGELOG"; then
+            PATCH_STATUS="patched"
+        elif [[ -n "$FIXED_VER" ]]; then
+            PATCH_STATUS="not_patched"
+        else
+            PATCH_STATUS="not_tracked"
+        fi
+    fi
+elif [[ "$CONTAINER" == "none" ]]; then
+    # Self-built kernel: compare the upstream version
+    KBASE="$(uname -r)"; KBASE="${KBASE%%[-+]*}"
+    FIXED_VER=$(upstream_fixed "$KBASE")
+    if [[ -n "$FIXED_VER" ]]; then
+        if ver_ge "$KBASE" "$FIXED_VER"; then PATCH_STATUS="patched"; else PATCH_STATUS="not_patched"; fi
+    elif ver_ge "$KBASE" "7.3"; then
+        PATCH_STATUS="patched"
+    fi
+fi
+
+if [[ "$CONTAINER" != "none" ]]; then
+    info "Running in a container (${CONTAINER}) – the kernel is the host's, check the host"
+fi
+if [[ -n "$KPKG_VER" ]]; then
+    info "Package     : ${KPKG_NAME} ${KPKG_VER}"
+fi
+case "$PATCH_STATUS" in
+    patched)
+        ok "Kernel fix installed${FIXED_VER:+ (fixed in ${FIXED_VER})}"
+        [[ "$KPKG_FLAVOUR" == "proxmox" ]] && \
+            info "  Proxmox fix version from the forum, not confirmed by Proxmox"
         ;;
-    debian:trixie|debian:forky)
-        FIXED_COPYFAIL="6.12.85-1"
-        FIXED_DIRTYFRAG="none"
-        FIXED_FRAGNESIA="none"
-        FIXED_PTRACE="6.12.88-1"    # DSA-6274-1
-        FIXED_CIFSWITCH="6.12.90-1" # upstream commit 3da1fdf4efbc queued for stable
+    not_patched)
+        warn "Kernel NOT patched – fixed in ${FIXED_VER:-a newer kernel}"
         ;;
-    debian:sid|debian:unstable)
-        FIXED_COPYFAIL="7.0.3-1"
-        FIXED_DIRTYFRAG="7.0.4-1"
-        FIXED_FRAGNESIA="none"
-        FIXED_PTRACE="7.0.7-1"
-        FIXED_CIFSWITCH="7.0.8-1"
+    not_tracked)
+        miss "No fixed-version data for ${KPKG_NAME} and no fix in its changelog"
+        [[ " ${_DISTRO_ID} ${_DISTRO_LIKE} " == *" ubuntu "* ]] && \
+            info "  Ubuntu had no fixed kernel as of 2026-10-30 – https://ubuntu.com/security/CVE-2026-98432"
         ;;
-    ubuntu:noble)
-        FIXED_COPYFAIL="6.8.0-60.62"
-        FIXED_DIRTYFRAG="none"
-        FIXED_FRAGNESIA="none"
-        FIXED_PTRACE="6.8.0-63.66"
-        FIXED_CIFSWITCH="6.8.0-64.67"
-        ;;
-    ubuntu:jammy)
-        FIXED_COPYFAIL="5.15.0-140.150"
-        FIXED_DIRTYFRAG="none"
-        FIXED_FRAGNESIA="none"
-        FIXED_PTRACE="5.15.0-142.152"
-        FIXED_CIFSWITCH="5.15.0-143.153"
-        ;;
-    ubuntu:focal)
-        FIXED_COPYFAIL="5.4.0-220.240"
-        FIXED_DIRTYFRAG="none"
-        FIXED_FRAGNESIA="none"
-        FIXED_PTRACE="5.4.0-222.242"
-        FIXED_CIFSWITCH="5.4.0-223.243"
-        ;;
-    *)
-        FIXED_COPYFAIL=""
-        FIXED_DIRTYFRAG=""
-        FIXED_FRAGNESIA=""
-        FIXED_PTRACE=""
-        FIXED_CIFSWITCH=""
+    unknown)
+        miss "Kernel package not identified – patch status unknown"
         ;;
 esac
 
-if [[ "$MODE" != "json" ]]; then
-    echo -e "\n${BOLD}[Patch Status] Kernel: $(uname -r) | Distro: ${_DISTRO_ID:-unknown} ${_DISTRO_VER:-}${RESET}"
-    if [[ -f "/boot/vmlinuz-$(uname -r)" ]]; then
-        info "Build date  : $(stat -c '%y' "/boot/vmlinuz-$(uname -r)" | cut -d' ' -f1)"
-    fi
-    if [[ -n "$KPKG_VER" ]]; then
-        info "Package     : ${KPKG_NAME} ${KPKG_VER}"
+# Running kernel older than the newest installed one?
+AVAIL=$(apt list --upgradable 2>/dev/null \
+    | grep -iE "^(linux-image|proxmox-kernel|pve-kernel)" || true)
+if [[ -n "$AVAIL" ]]; then
+    warn "Newer kernel available via apt – update recommended:"
+    while read -r line; do info "    $line"; done <<< "$AVAIL"
+fi
+
+# ── [2/3] Exposure ────────────────────────────────────────────────────────────
+section "[2/3] Exposure (IPv4 TCP listeners, MPTCP)"
+
+# 2a. TCP listeners reachable over IPv4: everything except loopback and
+#     addresses bound to one IPv6 address. [::] and * accept IPv4 too.
+IPV4_LISTENERS=0
+if command -v ss &>/dev/null; then
+    IPV4_LISTENERS=$(ss -Hltn 2>/dev/null | awk '
+        { addr = $4; sub(/:[0-9]+$/, "", addr); sub(/%.*/, "", addr) }
+        addr ~ /^127\./ || addr == "[::1]"                         { next }
+        addr ~ /^\[/ && addr != "[::]" && addr !~ /^\[::ffff:/     { next }
+        { n++ }
+        END { print n + 0 }')
+fi
+if [[ "$IPV4_LISTENERS" -gt 0 ]]; then
+    info "${IPV4_LISTENERS} TCP listener(s) reachable over IPv4 – attack surface present"
+else
+    ok "No TCP listener reachable over IPv4"
+fi
+
+# 2b. MPTCP listeners. The published root exploit needs one; the bug itself
+#     does not. Go >= 1.24 opens MPTCP listeners by default (Zabbix Agent 2,
+#     Traefik, docker-proxy, ...). Processes are only visible to root.
+MPTCP_SYSCTL=$(read_sysctl net.mptcp.enabled)
+MPTCP_LISTENERS="unknown"
+if command -v ss &>/dev/null && ss -HlnM &>/dev/null; then
+    MPTCP_LIST=$(ss -HlnMp 2>/dev/null || true)
+    MPTCP_LISTENERS=$(grep -c . <<< "$MPTCP_LIST" || true)
+    if [[ "$MPTCP_LISTENERS" -gt 0 ]]; then
+        warn "${MPTCP_LISTENERS} MPTCP listener(s) – matches the published exploit:"
+        while read -r line; do
+            info "    $(awk '{ $2 = $3 = ""; print }' <<< "$line" | tr -s ' ')"
+        done <<< "$MPTCP_LIST"
+        [[ "$IS_ROOT" != "true" ]] && info "  (run as root to see the processes)"
     else
-        miss "Running kernel image is not owned by a dpkg package – patch status unknown"
+        ok "No MPTCP listeners"
     fi
-    if [[ "$KPKG_FLAVOUR" == "proxmox" ]]; then
-        info "Proxmox kernel – Debian/Ubuntu fixed versions do not apply; patch status is not tracked"
-        info "  → check the Proxmox VE changelog / security advisories for this kernel"
+else
+    miss "ss cannot list MPTCP sockets (iproute2 too old?)"
+fi
+
+if [[ "$MPTCP_SYSCTL" == "absent" ]]; then
+    ok "Kernel without MPTCP (net.mptcp.enabled absent)"
+elif [[ "$MPTCP_SYSCTL" == "0" ]]; then
+    ok "net.mptcp.enabled=0 – no new MPTCP sockets in this network namespace"
+else
+    info "net.mptcp.enabled=${MPTCP_SYSCTL}"
+fi
+
+# 2c. Docker containers have their own network namespace with its own
+#     net.mptcp.enabled (default 1) – the host sysctl does not cover them.
+DOCKER_MPTCP=0
+if [[ "$IS_ROOT" == "true" ]] && command -v docker &>/dev/null && command -v nsenter &>/dev/null; then
+    while read -r cid; do
+        [[ -z "$cid" ]] && continue
+        pid=$(docker inspect -f '{{.State.Pid}}' "$cid" 2>/dev/null || echo 0)
+        [[ "$pid" -gt 0 ]] || continue
+        n=$(nsenter -t "$pid" -n ss -HlnM 2>/dev/null | grep -c . || true)
+        if [[ "$n" -gt 0 ]]; then
+            name=$(docker inspect -f '{{.Name}}' "$cid" 2>/dev/null || echo "$cid")
+            warn "Container ${name#/}: ${n} MPTCP listener(s)"
+            DOCKER_MPTCP=$((DOCKER_MPTCP + n))
+        fi
+    done < <(docker ps -q 2>/dev/null || true)
+    if [[ "$DOCKER_MPTCP" -gt 0 ]]; then
+        info "  → set GODEBUG=multipathtcp=0 in these services or patch the kernel"
     else
-        info "Checking patch status (version compare + changelog)..."
+        ok "No MPTCP listeners in Docker containers"
     fi
 fi
 
-# CVE-2026-31431 – Copy Fail
-# Upstream commit: a664bf3d603d
-kernel_patch_check PATCH_COPYFAIL "${FIXED_COPYFAIL:-none}" \
-    'a664bf3d603d|CVE-2026-31431|algif_aead.*out-of-place|Revert.*algif_aead'
-JSON_FIELDS[patch_copyfail]="$PATCH_COPYFAIL"
-
-# CVE-2026-43284/43500 – Dirty Frag
-# Upstream commits: e91c6cb57978 / b29d4a88e8ae
-kernel_patch_check PATCH_DIRTYFRAG "${FIXED_DIRTYFRAG:-none}" \
-    'e91c6cb57978|b29d4a88e8ae|CVE-2026-43284|CVE-2026-43500|esp.*in-place.*paged|rxrpc.*in-place.*paged'
-JSON_FIELDS[patch_dirtyfrag]="$PATCH_DIRTYFRAG"
-
-# CVE-2026-46300 – Fragnesia
-# Upstream commit: 3f8a2d1c905b
-kernel_patch_check PATCH_FRAGNESIA "${FIXED_FRAGNESIA:-none}" \
-    '3f8a2d1c905b|CVE-2026-46300|shared.frag.*coalescing|skb_try_coalesce.*SKBFL_SHARED_FRAG|preserve.*shared.frag'
-JSON_FIELDS[patch_fragnesia]="$PATCH_FRAGNESIA"
-
-# CVE-2026-46333 – ptrace mm-NULL bypass
-# Upstream commit: 31e62c2ebbfd
-kernel_patch_check PATCH_PTRACE "${FIXED_PTRACE:-none}" \
-    '31e62c2ebbfd|CVE-2026-46333|ptrace.*mm.*NULL|get_dumpable.*CAP_SYS_PTRACE|saner.*dumpable'
-JSON_FIELDS[patch_ptrace]="$PATCH_PTRACE"
-
-# CIFSwitch – kernel fix (cifs.spnego origin validation)
-# Upstream commit: 3da1fdf4efbc
-# Also requires: cifs-utils >= version with safe cifs.upcall (check separately below)
-kernel_patch_check PATCH_CIFSWITCH "${FIXED_CIFSWITCH:-none}" \
-    '3da1fdf4efbc|CIFSwitch|cifs.*spnego.*origin|cifs_spnego_key_type.*CAP_NET_ADMIN|validate.*spnego.*description'
-JSON_FIELDS[patch_cifswitch]="$PATCH_CIFSWITCH"
-
-# CIFSwitch also requires a patched cifs-utils (cifs.upcall) package.
-# Known fixed: cifs-utils >= 7.0-1+deb12u2 (Debian bookworm), >= 7.1-1 (trixie/sid)
-#              cifs-utils >= 2:7.0-1ubuntu1.2 (Ubuntu noble), >= 2:6.15-1ubuntu2.2 (jammy)
-PATCH_CIFSWITCH_UTILS="not_applicable"
-if [[ "$CIFSUTILS_INSTALLED" == "true" ]]; then
-    UTILS_VER=$(dpkg --status cifs-utils 2>/dev/null | awk '/^Version:/{print $2}' || true)
-    if [[ -n "$UTILS_VER" ]]; then
-        UTILS_FIXED=false
-        case "${_DISTRO_ID}:${_DISTRO_VER}" in
-            debian:bookworm)
-                dpkg --compare-versions "$UTILS_VER" ge "7.0-1+deb12u2" 2>/dev/null && UTILS_FIXED=true ;;
-            debian:trixie|debian:forky|debian:sid|debian:unstable)
-                dpkg --compare-versions "$UTILS_VER" ge "7.1-1" 2>/dev/null && UTILS_FIXED=true ;;
-            ubuntu:noble)
-                dpkg --compare-versions "$UTILS_VER" ge "2:7.0-1ubuntu1.2" 2>/dev/null && UTILS_FIXED=true ;;
-            ubuntu:jammy)
-                dpkg --compare-versions "$UTILS_VER" ge "2:6.15-1ubuntu2.2" 2>/dev/null && UTILS_FIXED=true ;;
-            ubuntu:focal)
-                dpkg --compare-versions "$UTILS_VER" ge "2:6.9-1ubuntu0.3" 2>/dev/null && UTILS_FIXED=true ;;
-        esac
-        [[ "$UTILS_FIXED" == "true" ]] && PATCH_CIFSWITCH_UTILS="patched" || PATCH_CIFSWITCH_UTILS="not_patched"
-    fi
+# 2d. Request socket migration opens a second, narrower path
+MIGRATE_REQ=$(read_sysctl net.ipv4.tcp_migrate_req)
+if [[ "$MIGRATE_REQ" == "1" ]]; then
+    warn "net.ipv4.tcp_migrate_req=1 – second trigger path open"
+else
+    ok "net.ipv4.tcp_migrate_req=${MIGRATE_REQ}"
 fi
-JSON_FIELDS[patch_cifswitch_utils]="$PATCH_CIFSWITCH_UTILS"
 
-# Print patch status with mitigation-removal advice
-if [[ "$MODE" != "json" ]]; then
-    _patch_line() {
-        local cve="$1" status="$2" mitfile="$3"
-        case "$status" in
-            patched)
-                ok "${cve}: kernel fix installed"
-                if [[ -n "$mitfile" && -f "$mitfile" ]]; then
-                    info "  → Mitigation can be removed:"
-                    info "    sudo rm ${mitfile} && sudo update-initramfs -u && sudo reboot"
-                fi
-                ;;
-            not_patched)
-                warn "${cve}: no kernel fix found in changelog – keep mitigation in place"
-                ;;
-            not_tracked)
-                miss "${cve}: no fixed-version data for ${KPKG_NAME} – patch status not tracked (keep mitigation)"
-                ;;
-            unknown)
-                miss "${cve}: kernel package not identified – patch status unknown (keep mitigation)"
-                ;;
-        esac
-    }
-
-    _patch_line "CVE-2026-31431 (Copy Fail) " "$PATCH_COPYFAIL" "/etc/modprobe.d/disable-algif.conf"
-    _patch_line "CVE-2026-43284/43500 (Dirty Frag)" "$PATCH_DIRTYFRAG" "/etc/modprobe.d/dirtyfrag.conf"
-    _patch_line "CVE-2026-46300 (Fragnesia)  " "$PATCH_FRAGNESIA" "/etc/modprobe.d/fragnesia.conf"
-    _patch_line "CVE-2026-46333 (ptrace mm-NULL)" "$PATCH_PTRACE" ""
-    _patch_line "CIFSwitch (kernel fix)     " "$PATCH_CIFSWITCH" ""
-    info "CVE-2026-23268..411 (CrackArmor): see [4/6] section above for per-component status"
-    # CIFSwitch cifs-utils package status
-    case "$PATCH_CIFSWITCH_UTILS" in
-        patched)       ok   "CIFSwitch (cifs-utils pkg)  : patched" ;;
-        not_patched)   warn "CIFSwitch (cifs-utils pkg)  : NOT patched – apt install cifs-utils" ;;
-        not_applicable) ok  "CIFSwitch (cifs-utils pkg)  : not applicable (cifs.upcall not installed)" ;;
-    esac
-
-    # Fragnesia & Dirty Frag share modules – warn if only one is patched
-    if [[ "$PATCH_DIRTYFRAG" == "patched" && "$PATCH_FRAGNESIA" != "patched" ]]; then
-        warn "Dirty Frag patched but Fragnesia is not yet – keep esp4/esp6/rxrpc blacklist"
-    fi
-
-    # Show available kernel updates
-    AVAIL=$(apt list --upgradable 2>/dev/null \
-        | grep -iE "^(linux-image|proxmox-kernel|pve-kernel)" || true)
-    if [[ -n "$AVAIL" ]]; then
-        warn "Newer kernel available via apt – update recommended:"
-        echo "$AVAIL" | while read -r line; do info "    $line"; done
+# 2e. nftables rule from --fix (listing needs root)
+NFT_MITIGATION="unknown"
+if [[ "$IS_ROOT" == "true" ]] && command -v nft &>/dev/null; then
+    if nft list table ip "$NFT_TABLE" &>/dev/null; then
+        NFT_MITIGATION="true"
+        ok "nftables drops IPv4 TCP with IP options (table ip ${NFT_TABLE})"
     else
-        ok "No newer kernel available via apt (already up to date)"
+        NFT_MITIGATION="false"
+        miss "No nftables rule against IP options (table ip ${NFT_TABLE})"
     fi
+elif [[ "$IS_ROOT" != "true" ]]; then
+    miss "nftables rule not checked – requires root"
+fi
 
-    # Ubuntu Pro hint
-    if command -v pro &>/dev/null; then
-        info "Ubuntu Pro: sudo pro fix CVE-2026-31431  (check livepatch status)"
-    fi
+# 2f. Crash traces of failed races in this boot's kernel log
+CRASH_TRACES=0
+if command -v journalctl &>/dev/null; then
+    CRASH_TRACES=$(journalctl -k -b --no-pager 2>/dev/null \
+        | grep -cE 'ip_options_build|ip_build_and_send_pkt|skb_under_panic' || true)
+fi
+if [[ "$CRASH_TRACES" -gt 0 ]]; then
+    warn "${CRASH_TRACES} kernel log line(s) matching the crash signature – possible exploit attempts:"
+    info "  → journalctl -k -b | grep -E 'ip_options_build|ip_build_and_send_pkt|skb_under_panic'"
+fi
+
+# Overall status
+if [[ "$PATCH_STATUS" == "patched" ]]; then
+    STATUS="patched"
+elif [[ "$NFT_MITIGATION" == "true" ]]; then
+    STATUS="mitigated"
+elif [[ "$IPV4_LISTENERS" -eq 0 ]]; then
+    STATUS="not_exposed"
+else
+    STATUS="vulnerable"
+fi
+
+# ── [3/3] Leftovers from earlier check-cve versions ──────────────────────────
+section "[3/3] Mitigations left by earlier check-cve versions"
+LEFTOVERS=()
+for f in /etc/modprobe.d/disable-algif.conf /etc/modprobe.d/dirtyfrag.conf \
+         /etc/modprobe.d/fragnesia.conf /etc/sysctl.d/99-cifswitch.conf; do
+    [[ -f "$f" ]] && LEFTOVERS+=("$f")
+done
+if [[ ${#LEFTOVERS[@]} -gt 0 ]]; then
+    info "Still in place (Copy Fail, Dirty Frag, Fragnesia, CIFSwitch – no longer checked):"
+    for f in "${LEFTOVERS[@]}"; do info "    $f"; done
+    info "  Harmless while the features are unused (esp4/esp6 block IPsec)."
+    info "  On a current kernel they can go: rm <file> && update-initramfs -u, then reboot"
+else
+    ok "None"
 fi
 
 # ── Apply mitigations (--fix mode) ───────────────────────────────────────────
 if [[ "$MODE" == "fix" ]]; then
     echo -e "\n${BOLD}[--fix] Applying mitigations...${RESET}"
 
-    if [[ "$(id -u)" -ne 0 ]]; then
+    if [[ "$IS_ROOT" != "true" ]]; then
         echo -e "${RED}Error: --fix requires root privileges (sudo check-cve --fix)${RESET}"
         exit 1
     fi
 
-    # Unload modules, then re-read /proc/modules: rmmod fails silently for
-    # modules in use, so success must not be assumed.
-    # Usage: unload_modules <mod>...   – prints a reboot hint per survivor
-    unload_modules() {
-        local mod
-        for mod in "$@"; do
-            module_loaded "$mod" && { rmmod "$mod" 2>/dev/null || true; }
-        done
-        refresh_modules
-        for mod in "$@"; do
-            if module_loaded "$mod"; then
-                warn "${mod} is still loaded (in use) – reboot required to unload it"
-            fi
-        done
+    if [[ "$PATCH_STATUS" == "patched" ]]; then
+        ok "Kernel is patched – no mitigation needed"
+        if [[ -f "$NFT_FILE" || -f "$SYSCTL_FILE" ]]; then
+            info "  Mitigation from an earlier --fix can be removed:"
+            info "    systemctl disable --now ${NFT_UNIT}; nft delete table ip ${NFT_TABLE}"
+            info "    rm -f /etc/systemd/system/${NFT_UNIT} ${NFT_FILE} ${SYSCTL_FILE}"
+        fi
+        exit 0
+    fi
+
+    # Sysctls: MPTCP off for new sockets, request migration off. Both only
+    # apply to this network namespace.
+    {
+        echo "# CVE-2026-98432 – set by check-cve --fix, remove once the kernel is patched"
+        [[ "$MPTCP_SYSCTL" != "absent" ]] && echo "net.mptcp.enabled = 0"
+        [[ "$MIGRATE_REQ" != "absent" ]] && echo "net.ipv4.tcp_migrate_req = 0"
+    } > "$SYSCTL_FILE"
+    [[ "$MPTCP_SYSCTL" != "absent" ]] && { echo 0 > /proc/sys/net/mptcp/enabled 2>/dev/null || true; }
+    [[ "$MIGRATE_REQ" != "absent" ]] && { echo 0 > /proc/sys/net/ipv4/tcp_migrate_req 2>/dev/null || true; }
+    if [[ "$(read_sysctl net.mptcp.enabled)" =~ ^(0|absent)$ ]]; then
+        ok "net.mptcp.enabled=0 (persisted to ${SYSCTL_FILE})"
+    else
+        warn "net.mptcp.enabled could not be set at runtime (persisted for next boot)"
+    fi
+    if [[ "${MPTCP_LISTENERS}" =~ ^[0-9]+$ && "$MPTCP_LISTENERS" -gt 0 ]]; then
+        warn "Existing MPTCP listeners stay open – restart these services (ss -lnMp)"
+    fi
+    if [[ "$DOCKER_MPTCP" -gt 0 ]]; then
+        warn "Docker containers are not covered – set GODEBUG=multipathtcp=0 there"
+    fi
+
+    # Drop IPv4 TCP packets carrying IP options (header longer than 20 bytes)
+    # before anything else sees them. Not vendor-confirmed, but it removes
+    # the trigger. Breaks CIPSO labelling (SELinux/Smack NetLabel). Also hits
+    # traffic routed through this host, and bridged traffic when
+    # br_netfilter is active (Proxmox firewall).
+    if command -v nft &>/dev/null; then
+        mkdir -p "$(dirname "$NFT_FILE")"
+        cat > "$NFT_FILE" <<EOF
+# CVE-2026-98432 – set by check-cve --fix, remove once the kernel is patched
+# Drops IPv4 TCP packets with IP options (Record Route, Timestamp, ...).
+add table ip ${NFT_TABLE}
+delete table ip ${NFT_TABLE}
+table ip ${NFT_TABLE} {
+    chain pre {
+        type filter hook prerouting priority -300; policy accept;
+        meta l4proto tcp ip hdrlength gt 5 counter drop
     }
+}
+EOF
+        cat > "/etc/systemd/system/${NFT_UNIT}" <<EOF
+[Unit]
+Description=CVE-2026-98432 mitigation: drop IPv4 TCP with IP options
+After=nftables.service
+Before=network-pre.target
+Wants=network-pre.target
 
-    # Copy Fail mitigation (only effective if module-based, not built-in)
-    if [[ "${CF_AEAD:-}" != *"=y"* ]]; then
-        echo "install algif_aead /bin/false" > /etc/modprobe.d/disable-algif.conf
-        ok "algif_aead blacklist set (/etc/modprobe.d/disable-algif.conf)"
-        unload_modules algif_aead
-    else
-        warn "algif_aead is built-in – modprobe.d fix skipped (manual GRUB config required)"
-        info "  Add 'initcall_blacklist=algif_aead_init' to GRUB_CMDLINE_LINUX"
-        info "  Then run: sudo update-grub && sudo reboot"
-    fi
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f ${NFT_FILE}
+ExecStop=/usr/sbin/nft delete table ip ${NFT_TABLE}
 
-    # Dirty Frag mitigation – esp4/esp6 are needed by IPsec, so they are only
-    # blacklisted on IPsec hosts when explicitly forced; rxrpc always.
-    DF_MODS=(esp4 esp6 rxrpc)
-    if [[ "$IPSEC_ACTIVE" == "true" && "$FORCE_IPSEC" != "true" ]]; then
-        DF_MODS=(rxrpc)
-        warn "IPsec in use – esp4/esp6 NOT blacklisted (would break IPsec tunnels)"
-        info "  Only rxrpc is blacklisted; Dirty Frag/Fragnesia via esp4/esp6 remain open until patched"
-        info "  To blacklist esp4/esp6 anyway: sudo check-cve --fix --force-ipsec"
-    fi
-    DF_CONF=""
-    for mod in "${DF_MODS[@]}"; do
-        DF_CONF+="install ${mod} /bin/false"$'\n'
-    done
-    printf '%s' "$DF_CONF" > /etc/modprobe.d/dirtyfrag.conf
-    ok "Dirty Frag modprobe.d blacklist set for ${DF_MODS[*]} (/etc/modprobe.d/dirtyfrag.conf)"
-    unload_modules "${DF_MODS[@]}"
-
-    # Fragnesia mitigation (same modules – create dedicated file for auditability)
-    #     On IPsec hosts without --force-ipsec the file is always rewritten, so
-    #     esp4/esp6 lines left by an earlier --fix do not keep blocking IPsec.
-    if [[ ! -f /etc/modprobe.d/fragnesia.conf ]] || \
-       [[ "$IPSEC_ACTIVE" == "true" && "$FORCE_IPSEC" != "true" ]]; then
-        {
-            printf '# CVE-2026-46300 Fragnesia – same surface as Dirty Frag\n'
-            printf '# Covered by dirtyfrag.conf; this file documents the intent explicitly.\n'
-            printf '%s' "$DF_CONF"
-        } > /etc/modprobe.d/fragnesia.conf
-        ok "Fragnesia dedicated mitigation set for ${DF_MODS[*]} (/etc/modprobe.d/fragnesia.conf)"
-    else
-        ok "Fragnesia mitigation already present (/etc/modprobe.d/fragnesia.conf)"
-    fi
-
-    # Any other modprobe.d file that still blocks esp4/esp6 takes effect on
-    # the next load attempt, i.e. immediately – not only after a reboot.
-    if [[ "$IPSEC_ACTIVE" == "true" && "$FORCE_IPSEC" != "true" ]]; then
-        ESP_BLOCKERS=$(grep -lsE '^[[:space:]]*(install|blacklist)[[:space:]]+esp[46]([[:space:]]|$)' \
-            /etc/modprobe.d/*.conf || true)
-        if [[ -n "$ESP_BLOCKERS" ]]; then
-            warn "esp4/esp6 are still blocked by other modprobe.d files – IPsec cannot load them:"
-            while read -r f; do info "    $f"; done <<< "$ESP_BLOCKERS"
+[Install]
+WantedBy=multi-user.target
+EOF
+        systemctl daemon-reload
+        if systemctl enable --now "$NFT_UNIT" &>/dev/null && nft list table ip "$NFT_TABLE" &>/dev/null; then
+            ok "nftables rule active and persisted (${NFT_UNIT})"
+        else
+            warn "nftables rule could not be loaded – systemctl status ${NFT_UNIT}"
         fi
+    else
+        warn "nft not installed – IP options cannot be filtered (apt install nftables)"
     fi
 
-    if [[ "$IPSEC_ACTIVE" == "true" && "$FORCE_IPSEC" == "true" ]]; then
-        warn "IPsec in use – esp4/esp6 are now disabled (--force-ipsec). Verify VPN functionality!"
-    fi
-
-    echo -e "\n${YELLOW}Note: mitigations are active but not a substitute for kernel updates.${RESET}"
+    echo -e "\n${YELLOW}Note: mitigations are not a substitute for a kernel update.${RESET}"
     echo    "  Update system: apt update && apt full-upgrade && reboot"
-    echo    "  After reboot: re-run check-cve – if 'patched', mitigations can be removed."
-
-    # CIFSwitch mitigation
-    echo -e "\n${BOLD}  [CIFSwitch]${RESET}"
-    # Without cifs.upcall the exploit chain is broken – leave userns alone,
-    # disabling it would only cost container/sandbox functionality.
-    if [[ "$CIFSUTILS_INSTALLED" != "true" ]]; then
-        ok "cifs.upcall not installed – CIFSwitch not exploitable, user namespaces left unchanged"
-    elif [[ "$USERNS_ENABLED" != "true" ]]; then
-        if [[ "$USERNS_VAL" == "0" ]]; then
-            ok "${USERNS_SYSCTL} already 0 – CIFSwitch blocked"
-        else
-            miss "User namespace state unknown – sysctl mitigation not applied"
-        fi
-        info "  Preferred if Kerberos CIFS mounts are not used:"
-        info "    apt remove cifs-utils   (removes cifs.upcall, fully eliminates exploit path)"
-    else
-        info "  Preferred if Kerberos CIFS mounts are not used:"
-        info "    apt remove cifs-utils   (removes cifs.upcall, fully eliminates exploit path)"
-        if [[ "$USERNS_SYSCTL" == "kernel.unprivileged_userns_clone" ]]; then
-            echo "kernel.unprivileged_userns_clone=0" > /etc/sysctl.d/99-cifswitch.conf
-            sysctl -w kernel.unprivileged_userns_clone=0 >/dev/null 2>&1 || true
-            if [[ "$(cat /proc/sys/kernel/unprivileged_userns_clone 2>/dev/null)" == "0" ]]; then
-                ok "kernel.unprivileged_userns_clone=0 set (persisted to /etc/sysctl.d/99-cifswitch.conf)"
-            else
-                warn "kernel.unprivileged_userns_clone could not be set at runtime (persisted for next boot)"
-            fi
-            info "  Note: some desktop features (browsers, containers) may require userns."
-            info "  If needed, re-enable with: sudo sysctl -w kernel.unprivileged_userns_clone=1"
-        else
-            # user.max_user_namespaces=0 also blocks root (LXC, Docker userns, sandboxes)
-            warn "kernel.unprivileged_userns_clone not available on this kernel"
-            info "  user.max_user_namespaces=0 would block ALL new user namespaces, including root"
-            info "  (containers, sandboxes) – not applied automatically. If acceptable:"
-            info "    sudo sysctl -w user.max_user_namespaces=0"
-        fi
-    fi
+    echo    "  After the reboot run check-cve --fix again: on a patched kernel it"
+    echo    "  prints the commands to remove the mitigation."
 fi
 
 # ── JSON output (--json mode) ─────────────────────────────────────────────────
 if [[ "$MODE" == "json" ]]; then
-    HOSTNAME=$(hostname -f 2>/dev/null || hostname)
-    KERNEL=$(uname -r)
-    OS=$(grep PRETTY_NAME /etc/os-release 2>/dev/null | cut -d'"' -f2 || echo "unknown")
-    DATE=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
-    # String member: "key": "escaped value",
-    _jstr() { printf '  "%s": "%s",\n' "$1" "$(json_escape "$2")"; }
-    # Boolean member: anything but "true" is emitted as false
-    _jbool() {
-        local v=false sep="${3-,}"
-        [[ "$2" == "true" ]] && v=true
-        printf '  "%s": %s%s\n' "$1" "$v" "$sep"
-    }
+    _jstr() { printf '  "%s": "%s"%s\n' "$1" "$(json_escape "$2")" "${3-,}"; }
+    _jnum() { printf '  "%s": %s%s\n' "$1" "$2" "${3-,}"; }
+    [[ "$MPTCP_LISTENERS" =~ ^[0-9]+$ ]] || MPTCP_LISTENERS=null
     printf '{\n'
-    _jstr hostname   "$HOSTNAME"
-    _jstr kernel     "$KERNEL"
-    _jstr os         "$OS"
-    _jstr checked_at "$DATE"
-    _jstr CVE_2026_31431_copyfail   "${JSON_FIELDS[copyfail]}"
-    _jstr CVE_2026_43284_dirtyfrag  "${JSON_FIELDS[dirtyfrag]}"
-    _jstr CVE_2026_46300_fragnesia  "${JSON_FIELDS[fragnesia]}"
-    _jstr CVE_2026_23268_crackarmor "${JSON_FIELDS[crackarmor]:-unknown}"
-    _jstr crackarmor_apparmor       "${JSON_FIELDS[crackarmor_apparmor]:-unknown}"
-    _jstr CVE_2026_46333_ptrace     "${JSON_FIELDS[ptrace_mmnull]:-unknown}"
-    _jstr patch_copyfail            "${JSON_FIELDS[patch_copyfail]:-unknown}"
-    _jstr patch_dirtyfrag           "${JSON_FIELDS[patch_dirtyfrag]:-unknown}"
-    _jstr patch_fragnesia           "${JSON_FIELDS[patch_fragnesia]:-unknown}"
-    _jstr patch_ptrace              "${JSON_FIELDS[patch_ptrace]:-unknown}"
-    _jstr cifswitch                 "${JSON_FIELDS[cifswitch]:-unknown}"
-    _jbool cifswitch_userns         "${JSON_FIELDS[cifswitch_userns]:-false}"
-    _jbool cifswitch_upcall         "${JSON_FIELDS[cifswitch_upcall]:-false}"
-    _jstr patch_cifswitch           "${JSON_FIELDS[patch_cifswitch]:-unknown}"
-    _jstr patch_cifswitch_utils     "${JSON_FIELDS[patch_cifswitch_utils]:-unknown}"
-    _jbool ipsec_active             "${JSON_FIELDS[ipsec_active]:-false}" ""
+    _jstr hostname         "$(hostname -f 2>/dev/null || hostname)"
+    _jstr kernel           "$(uname -r)"
+    _jstr os               "$(grep PRETTY_NAME /etc/os-release 2>/dev/null | cut -d'"' -f2 || echo unknown)"
+    _jstr checked_at       "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    _jstr container        "$CONTAINER"
+    _jstr kernel_package   "${KPKG_NAME:+$KPKG_NAME $KPKG_VER}"
+    _jstr CVE_2026_98432   "$STATUS"
+    _jstr patch            "$PATCH_STATUS"
+    _jnum ipv4_listeners   "$IPV4_LISTENERS"
+    _jnum mptcp_listeners  "$MPTCP_LISTENERS"
+    _jnum mptcp_listeners_docker "$DOCKER_MPTCP"
+    _jstr mptcp_enabled    "$MPTCP_SYSCTL"
+    _jstr tcp_migrate_req  "$MIGRATE_REQ"
+    _jstr nft_mitigation   "$NFT_MITIGATION"
+    _jnum crash_traces     "$CRASH_TRACES"
+    _jnum legacy_mitigations "${#LEFTOVERS[@]}" ""
     printf '}\n'
     exit 0
 fi
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo -e "\n${BOLD}============================================================${RESET}"
-echo -e "${BOLD} Recommendations${RESET}"
+echo -e "${BOLD} Result: CVE-2026-98432 ${STATUS}${RESET}"
 echo -e "${BOLD}------------------------------------------------------------${RESET}"
-echo    "  1. Patch the system (highest priority):"
+echo    "  1. Patch the system (the only real fix):"
 echo    "       apt update && apt full-upgrade && reboot"
 echo    ""
-echo    "  2. Apply immediate mitigations (if not yet patched):"
+echo    "  2. Until then, mitigate (not vendor-confirmed):"
 echo    "       sudo check-cve --fix"
+echo    "       Go services: GODEBUG=multipathtcp=0"
 echo    ""
-echo    "  3. Copy Fail – PoC / advisory:"
-echo    "       https://ubuntu.com/blog/copy-fail-vulnerability-fixes-available"
-echo    ""
-echo    "  4. Dirty Frag – PoC / advisory:"
-echo    "       https://github.com/V4bel/dirtyfrag"
-echo    "       https://www.wiz.io/blog/dirty-frag-linux-kernel-local-privilege-escalation-via-esp-and-rxrpc"
-echo    ""
-echo    "  5. Fragnesia – PoC / advisory:"
-echo    "       https://github.com/v12-security/pocs/tree/main/fragnesia"
-echo    "       https://almalinux.org/blog/2026-05-13-fragnesia-cve-2026-46300/"
-echo    "       https://blog.cloudlinux.com/fragnesia-mitigation-and-kernel-update"
-echo    ""
-echo    "  6. CrackArmor – advisory (no modprobe mitigation – patch only):"
-echo    "       https://ubuntu.com/security/vulnerabilities/crackarmor"
-echo    "       https://blog.qualys.com/vulnerabilities-threat-research/2026/03/12/crackarmor-critical-apparmor-flaws-enable-local-privilege-escalation-to-root"
-echo    "       apt update && apt install util-linux login sudo"
-echo    ""
-echo    "  7. ptrace mm-NULL bypass – PoC / advisory (patch only):"
-echo    "       https://security-tracker.debian.org/tracker/CVE-2026-46333"
-echo    "       https://github.com/0xdeadbeefnetwork/ssh-keysign-pwn"
-echo    "       DSA-6275-1 (bookworm) / DSA-6274-1 (trixie) / DLA-4587-1 (bullseye)"
-echo    ""
-echo    "  8. CIFSwitch – CIFS/cifs.spnego key forgery (patch + cifs-utils update):"
-echo    "       https://heyitsas.im/posts/cifswitch/"
-echo    "       https://github.com/manizada/CIFSwitch"
-echo    "       apt update && apt full-upgrade   (kernel + cifs-utils)"
-echo    "       Preferred: apt remove cifs-utils  (if Kerberos CIFS mounts unused)"
-echo    "       Mitigation: sudo check-cve --fix  (sets unprivileged_userns_clone=0 if cifs-utils is installed)"
+echo    "  3. Advisories:"
+echo    "       https://security-tracker.debian.org/tracker/CVE-2026-98432"
+echo    "       https://ubuntu.com/security/CVE-2026-98432"
 echo -e "${BOLD}============================================================${RESET}\n"
