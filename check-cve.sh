@@ -58,6 +58,18 @@ if [[ "$OPT_FIX" == "true" && "$OPT_JSON" == "true" ]]; then
     exit 1
 fi
 
+# Update the script collection first: fixed versions go stale quickly.
+# Only as root (git reset in root's repository); output goes to stderr so
+# --json stays clean. git replaces the file, while bash keeps reading the
+# old one, so restart once with the new version.
+if [[ "$(id -u)" -eq 0 && -z "${CHECK_CVE_UPDATED:-}" ]] && command -v update-scripts &>/dev/null; then
+    if update-scripts >&2; then
+        export CHECK_CVE_UPDATED=1
+        exec "$0" "$@"
+    fi
+    echo "[!] Warning: update-scripts failed, checking with the current version." >&2
+fi
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 # In JSON mode stdout must carry nothing but the JSON document.
 ok()   { [[ "$MODE" == "json" ]] && return 0; echo -e "  ${GREEN}[OK]${RESET}   $*"; }
@@ -293,6 +305,9 @@ fi
 # ── [2/3] Exposure ────────────────────────────────────────────────────────────
 section "[2/3] Exposure (IPv4 TCP listeners, MPTCP)"
 
+# Exposure findings are only a problem while the kernel is unpatched
+exposure() { if [[ "$PATCH_STATUS" == "patched" ]]; then info "$@"; else warn "$@"; fi; }
+
 # 2a. TCP listeners reachable over IPv4: everything except loopback and
 #     addresses bound to one IPv6 address. [::] and * accept IPv4 too.
 IPV4_LISTENERS=0
@@ -319,7 +334,7 @@ if command -v ss &>/dev/null && ss -HlnM &>/dev/null; then
     MPTCP_LIST=$(ss -HlnMp 2>/dev/null || true)
     MPTCP_LISTENERS=$(grep -c . <<< "$MPTCP_LIST" || true)
     if [[ "$MPTCP_LISTENERS" -gt 0 ]]; then
-        warn "${MPTCP_LISTENERS} MPTCP listener(s) – matches the published exploit:"
+        exposure "${MPTCP_LISTENERS} MPTCP listener(s) – matches the published exploit:"
         while read -r line; do
             info "    $(awk '{ $2 = $3 = ""; print }' <<< "$line" | tr -s ' ')"
         done <<< "$MPTCP_LIST"
@@ -350,13 +365,13 @@ if [[ "$IS_ROOT" == "true" ]] && command -v docker &>/dev/null && command -v nse
         n=$(nsenter -t "$pid" -n ss -HlnM 2>/dev/null | grep -c . || true)
         if [[ "$n" -gt 0 ]]; then
             name=$(docker inspect -f '{{.Name}}' "$cid" 2>/dev/null || echo "$cid")
-            warn "Container ${name#/}: ${n} MPTCP listener(s)"
+            exposure "Container ${name#/}: ${n} MPTCP listener(s)"
             DOCKER_MPTCP=$((DOCKER_MPTCP + n))
         fi
     done < <(docker ps -q 2>/dev/null || true)
-    if [[ "$DOCKER_MPTCP" -gt 0 ]]; then
+    if [[ "$DOCKER_MPTCP" -gt 0 && "$PATCH_STATUS" != "patched" ]]; then
         info "  → set GODEBUG=multipathtcp=0 in these services or patch the kernel"
-    else
+    elif [[ "$DOCKER_MPTCP" -eq 0 ]]; then
         ok "No MPTCP listeners in Docker containers"
     fi
 fi
@@ -364,7 +379,7 @@ fi
 # 2d. Request socket migration opens a second, narrower path
 MIGRATE_REQ=$(read_sysctl net.ipv4.tcp_migrate_req)
 if [[ "$MIGRATE_REQ" == "1" ]]; then
-    warn "net.ipv4.tcp_migrate_req=1 – second trigger path open"
+    exposure "net.ipv4.tcp_migrate_req=1 – second trigger path open"
 else
     ok "net.ipv4.tcp_migrate_req=${MIGRATE_REQ}"
 fi
@@ -377,9 +392,9 @@ if [[ "$IS_ROOT" == "true" ]] && command -v nft &>/dev/null; then
         ok "nftables drops IPv4 TCP with IP options (table ip ${NFT_TABLE})"
     else
         NFT_MITIGATION="false"
-        miss "No nftables rule against IP options (table ip ${NFT_TABLE})"
+        [[ "$PATCH_STATUS" != "patched" ]] && miss "No nftables rule against IP options (table ip ${NFT_TABLE})"
     fi
-elif [[ "$IS_ROOT" != "true" ]]; then
+elif [[ "$IS_ROOT" != "true" && "$PATCH_STATUS" != "patched" ]]; then
     miss "nftables rule not checked – requires root"
 fi
 
@@ -415,7 +430,7 @@ done
 if [[ ${#LEFTOVERS[@]} -gt 0 ]]; then
     info "Still in place (Copy Fail, Dirty Frag, Fragnesia, CIFSwitch – no longer checked):"
     for f in "${LEFTOVERS[@]}"; do info "    $f"; done
-    info "  Harmless while the features are unused (esp4/esp6 block IPsec)."
+    info "  Harmless while the features are unused (esp4/esp6 blacklisted = no IPsec)."
     info "  On a current kernel they can go: rm <file> && update-initramfs -u, then reboot"
 else
     ok "None"
@@ -542,14 +557,21 @@ fi
 echo -e "\n${BOLD}============================================================${RESET}"
 echo -e "${BOLD} Result: CVE-2026-98432 ${STATUS}${RESET}"
 echo -e "${BOLD}------------------------------------------------------------${RESET}"
-echo    "  1. Patch the system (the only real fix):"
-echo    "       apt update && apt full-upgrade && reboot"
+if [[ "$PATCH_STATUS" == "patched" ]]; then
+    echo    "  Kernel is patched – nothing to do."
+    if [[ "$NFT_MITIGATION" == "true" || -f "$SYSCTL_FILE" ]]; then
+        echo    "  The mitigation from --fix can be removed: sudo check-cve --fix"
+    fi
+else
+    echo    "  1. Patch the system (the only real fix):"
+    echo    "       apt update && apt full-upgrade && reboot"
+    echo    ""
+    echo    "  2. Until then, mitigate (not vendor-confirmed):"
+    echo    "       sudo check-cve --fix"
+    echo    "       Go services: GODEBUG=multipathtcp=0"
+fi
 echo    ""
-echo    "  2. Until then, mitigate (not vendor-confirmed):"
-echo    "       sudo check-cve --fix"
-echo    "       Go services: GODEBUG=multipathtcp=0"
-echo    ""
-echo    "  3. Advisories:"
+echo    "  Advisories:"
 echo    "       https://security-tracker.debian.org/tracker/CVE-2026-98432"
 echo    "       https://ubuntu.com/security/CVE-2026-98432"
 echo -e "${BOLD}============================================================${RESET}\n"
