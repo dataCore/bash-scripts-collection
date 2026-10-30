@@ -202,7 +202,7 @@ if ! grep -q 'sid' /etc/debian_version 2>/dev/null &&
     ! apt-cache policy 2>/dev/null | grep -qE '[[:space:]][a-z]+-security/'; then
     SECURITY_REPO_MISSING=true
     echo "[!] Warning: no *-security repository configured, security updates are missing."
-    echo "    Add e.g. 'deb http://security.debian.org/debian-security <release>-security main'"
+    echo "    Run 'fix-apt-sources' to see the fix, 'fix-apt-sources --apply' to apply it."
 fi
 
 # Install upgrades and kernel updates. Locally modified conffiles are kept
@@ -239,6 +239,7 @@ fi
 
 if [ "$SECURITY_REPO_MISSING" = true ]; then
     echo "[!] Warning: no *-security repository configured, security updates are missing."
+    echo "    Fix: fix-apt-sources --apply"
 fi
 
 echo "[✓] All done."

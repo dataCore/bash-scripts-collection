@@ -7,6 +7,7 @@ scripts=(
     "backup-docker-all.sh:backup-docker-all"
     "backup-remoteserver.sh:backup-remoteserver"
     "check-cve.sh:check-cve"
+    "fix-apt-sources.sh:fix-apt-sources"
     "install-docker.sh:install-docker"
     "install-dockeradminagent.sh:install-dockeradminagent"
     "install-log.sh:install-log"
