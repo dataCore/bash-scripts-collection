@@ -13,6 +13,7 @@
 # 2026-08-19 Fix "reboot: command not found" (sbin missing from PATH)
 # 2026-10-19 Abort on a failed upgrade, keep local conffiles
 # 2026-10-19 Respect a pinned kernel, reboot only once per target kernel
+# 2026-10-30 Remove old kernels first when /boot runs out of space
 #
 # =======================================================================
 # START script
@@ -145,6 +146,25 @@ if [ "$rc" -eq 0 ]; then
     echo "[✓] update-scripts finished (exit 0)."
 else
     echo "[!] Warning: update-scripts failed (exit $rc), continuing with the current scripts."
+fi
+
+# A full /boot breaks the initramfs of a new kernel halfway ("No space left
+# on device") and leaves dpkg unconfigured. The cleanup below only runs after
+# a successful upgrade, so remove old kernels first when /boot is low, and
+# refuse to upgrade when there is still too little room.
+BOOT_MIN_FREE_MB=300
+boot_free_mb() {
+    df -Pm /boot | awk 'NR == 2 { print $4 }'
+}
+if [ "$(boot_free_mb)" -lt "$BOOT_MIN_FREE_MB" ]; then
+    echo "Only $(boot_free_mb) MB free on /boot, removing old kernels..."
+    apt-get -o DPkg::Lock::Timeout=600 autoremove --purge -y
+    if [ "$(boot_free_mb)" -lt "$BOOT_MIN_FREE_MB" ]; then
+        echo "Error: only $(boot_free_mb) MB free on /boot (need $BOOT_MIN_FREE_MB MB)."
+        echo "       Remove old kernels by hand (proxmox-boot-tool kernel list, dpkg -l '*kernel*')."
+        echo "       No upgrade, no reboot."
+        exit 1
+    fi
 fi
 
 # Finish an interrupted dpkg run first, otherwise apt-get refuses to work
