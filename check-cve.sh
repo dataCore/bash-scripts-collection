@@ -258,6 +258,11 @@ if [[ -n "$KPKG_VER" ]]; then
             PATCH_STATUS="not_tracked"
         fi
     fi
+elif [[ "$CONTAINER" != "none" && "$(uname -r)" =~ ^(7\.0\.[0-9]+-[0-9]+)-pve$ ]]; then
+    # LXC on Proxmox: uname shows the host's kernel, its version is the
+    # package version of proxmox-kernel-7.0.x
+    FIXED_VER="7.0.14-25"
+    if ver_ge "${BASH_REMATCH[1]}" "$FIXED_VER"; then PATCH_STATUS="patched"; else PATCH_STATUS="not_patched"; fi
 elif [[ "$CONTAINER" == "none" ]]; then
     # Self-built kernel: compare the upstream version
     KBASE="$(uname -r)"; KBASE="${KBASE%%[-+]*}"
@@ -270,7 +275,7 @@ elif [[ "$CONTAINER" == "none" ]]; then
 fi
 
 if [[ "$CONTAINER" != "none" ]]; then
-    info "Running in a container (${CONTAINER}) – the kernel is the host's, check the host"
+    info "Running in a container (${CONTAINER}) – kernel $(uname -r) belongs to the host"
 fi
 if [[ -n "$KPKG_VER" ]]; then
     info "Package     : ${KPKG_NAME} ${KPKG_VER}"
@@ -278,7 +283,7 @@ fi
 case "$PATCH_STATUS" in
     patched)
         ok "Kernel fix installed${FIXED_VER:+ (fixed in ${FIXED_VER})}"
-        [[ "$KPKG_FLAVOUR" == "proxmox" ]] && \
+        [[ "$KPKG_FLAVOUR" == "proxmox" || "$(uname -r)" == *-pve ]] && \
             info "  Proxmox fix version from the forum, not confirmed by Proxmox"
         ;;
     not_patched)
@@ -430,8 +435,12 @@ done
 if [[ ${#LEFTOVERS[@]} -gt 0 ]]; then
     info "Still in place (Copy Fail, Dirty Frag, Fragnesia, CIFSwitch – no longer checked):"
     for f in "${LEFTOVERS[@]}"; do info "    $f"; done
-    info "  Harmless while the features are unused (esp4/esp6 blacklisted = no IPsec)."
-    info "  On a current kernel they can go: rm <file> && update-initramfs -u, then reboot"
+    if [[ "$CONTAINER" != "none" ]]; then
+        info "  No effect in a container (the host loads the modules) – remove them: rm <file>"
+    else
+        info "  Harmless while the features are unused (esp4/esp6 blacklisted = no IPsec)."
+        info "  On a current kernel they can go: rm <file> && update-initramfs -u, then reboot"
+    fi
 else
     ok "None"
 fi
@@ -563,8 +572,13 @@ if [[ "$PATCH_STATUS" == "patched" ]]; then
         echo    "  The mitigation from --fix can be removed: sudo check-cve --fix"
     fi
 else
-    echo    "  1. Patch the system (the only real fix):"
-    echo    "       apt update && apt full-upgrade && reboot"
+    if [[ "$CONTAINER" != "none" ]]; then
+        echo    "  1. Patch the HOST kernel (the only real fix) – not possible in the container:"
+        echo    "       on the host: apt update && apt full-upgrade && reboot"
+    else
+        echo    "  1. Patch the system (the only real fix):"
+        echo    "       apt update && apt full-upgrade && reboot"
+    fi
     echo    ""
     echo    "  2. Until then, mitigate (not vendor-confirmed):"
     echo    "       sudo check-cve --fix"
