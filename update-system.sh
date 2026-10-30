@@ -14,6 +14,7 @@
 # 2026-10-19 Abort on a failed upgrade, keep local conffiles
 # 2026-10-19 Respect a pinned kernel, reboot only once per target kernel
 # 2026-10-30 Remove old kernels first when /boot runs out of space
+# 2026-10-30 Warn when no *-security repository is configured
 #
 # =======================================================================
 # START script
@@ -192,6 +193,18 @@ if ! apt-get -o DPkg::Lock::Timeout=600 update; then
     exit 1
 fi
 
+# Without a <release>-security source a host only gets fixes with point
+# releases, weeks late (zenoWeb01 had none since its install). Warn here
+# and again at the end, so the warning is not lost in the apt output.
+# Debian sid/testing has no security suite.
+SECURITY_REPO_MISSING=false
+if ! grep -q 'sid' /etc/debian_version 2>/dev/null &&
+    ! apt-cache policy 2>/dev/null | grep -qE '[[:space:]][a-z]+-security/'; then
+    SECURITY_REPO_MISSING=true
+    echo "[!] Warning: no *-security repository configured, security updates are missing."
+    echo "    Add e.g. 'deb http://security.debian.org/debian-security <release>-security main'"
+fi
+
 # Install upgrades and kernel updates. Locally modified conffiles are kept
 # instead of stopping at the prompt; a running apt (unattended-upgrades) is
 # waited for instead of failing on the lock.
@@ -222,6 +235,10 @@ if reboot_due; then
             echo "[i] Reboot skipped: $REBOOT_REASON"
         fi
     fi
+fi
+
+if [ "$SECURITY_REPO_MISSING" = true ]; then
+    echo "[!] Warning: no *-security repository configured, security updates are missing."
 fi
 
 echo "[✓] All done."
