@@ -266,6 +266,31 @@ for f in "${MARIADB_ROOT_PASSWORD_FILE:-}" "${MYSQL_ROOT_PASSWORD_FILE:-}"; do
 done
 export MYSQL_PWD
 '
+
+# Credentials for mongodump/mongorestore, resolved inside the container: sets
+# "$@" to the auth options and, where supported, writes the password to a
+# temp --config file ($cfg, removed by the caller). Keep in sync with
+# restore-docker.
+# shellcheck disable=SC2016
+MONGO_AUTH_SH='set --
+pw="${MONGO_INITDB_ROOT_PASSWORD:-}"
+if [ -z "$pw" ] && [ -n "${MONGO_INITDB_ROOT_PASSWORD_FILE:-}" ] && [ -r "$MONGO_INITDB_ROOT_PASSWORD_FILE" ]; then
+    pw=$(cat "$MONGO_INITDB_ROOT_PASSWORD_FILE")
+fi
+user="${MONGO_INITDB_ROOT_USERNAME:-}"
+if [ -z "$user" ] && [ -n "${MONGO_INITDB_ROOT_USERNAME_FILE:-}" ] && [ -r "$MONGO_INITDB_ROOT_USERNAME_FILE" ]; then
+    user=$(cat "$MONGO_INITDB_ROOT_USERNAME_FILE")
+fi
+if [ -n "$user" ]; then
+    if mongodump --help 2>&1 | grep -q -- "--config"; then
+        cfg=$(mktemp) && chmod 600 "$cfg"
+        printf "password: '"'"'%s'"'"'\n" "$(printf "%s" "$pw" | sed "s/'"'"'/'"'"''"'"'/g")" > "$cfg"
+        set -- --authenticationDatabase admin -u "$user" --config "$cfg"
+    else
+        set -- --authenticationDatabase admin -u "$user" -p "$pw"
+    fi
+fi
+'
 # Succeeds when a password was found (or the image allows an empty one)
 # shellcheck disable=SC2016
 MYSQL_PW_CHECK='[ -n "$MYSQL_PWD" ] || [ -n "${MARIADB_ALLOW_EMPTY_ROOT_PASSWORD:-}${MYSQL_ALLOW_EMPTY_PASSWORD:-}" ]'
@@ -493,13 +518,13 @@ for cont in $ALLCONTAINER; do
         print_status "  🍃 MongoDB: ${OUTPUT}... "
         begin_backup "$OUTPUT"
         # With MONGO_INITDB_ROOT_* set the server enforces auth (e.g. Komodo).
+        # The password goes through a --config file, not -p, so it never shows
+        # in ps; tools older than 100.3 have no --config and get -p.
         # shellcheck disable=SC2016
-        if docker exec "$cont" sh -c 'set --
-                if [ -n "${MONGO_INITDB_ROOT_USERNAME:-}" ]; then
-                    set -- --authenticationDatabase admin \
-                        -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD"
-                fi
-                exec mongodump --archive --gzip --quiet "$@"' > "$PART"; then
+        if docker exec "$cont" sh -c "${MONGO_AUTH_SH}"'
+                mongodump --archive --gzip --quiet "$@"; rc=$?
+                [ -n "${cfg:-}" ] && rm -f "$cfg"
+                exit $rc' > "$PART"; then
             commit_backup "$OUTPUT"
             print_duration $(( $(date +%s) - START ))
         else
