@@ -18,8 +18,15 @@
 #   chmod 0440 /etc/sudoers.d/pbs-remote-backup && visudo -c
 # Then remove the old rule (/usr/bin/env PBS_PASSWORD=* PBS_FINGERPRINT=* ...).
 #
-# Optional /etc/pbs-remote-backup.conf (root-owned), restricting the paths:
+# /etc/pbs-remote-backup.conf (root-owned), recommended: without it the
+# caller picks repository and fingerprint, so whoever holds the backup user's
+# key can send any non-system directory to a PBS of their own through a
+# tunnel of their own.
 #   PBS_REMOTE_ALLOWED_PATHS="/mnt/data /srv/share"
+#   PBS_REMOTE_REPOSITORY="root@pam@localhost:Backup-HDD"
+#   PBS_REMOTE_FINGERPRINT="AA:BB:..."
+# System directories (/, /etc, /root, /boot, /usr, /var/lib, ...) are
+# always refused.
 #
 # Usage:   echo -n "$PBS_PASSWORD" | sudo -n pbs-remote-backup <archive>.pxar <path> <repository> <fingerprint>
 # Example: ... | sudo -n pbs-remote-backup fileserver-backup.pxar /mnt/data/Backups 'root@pam@localhost:Backup-HDD' 'AA:BB:...'
@@ -70,6 +77,24 @@ if [ -f "$CONFIG_FILE" ]; then
     # shellcheck source=/dev/null
     source "$CONFIG_FILE"
 fi
+# Never readable through this wrapper, whatever the config says
+case "$REAL_PATH/" in
+    / | /etc/* | /root/* | /boot/* | /usr/* | /bin/* | /sbin/* | /lib*/* | \
+    /var/lib/* | /var/backups/* | /proc/* | /sys/* | /dev/* | /run/*)
+        die "path '$REAL_PATH' is a system directory and cannot be backed up through this wrapper."
+        ;;
+esac
+
+if [ -n "${PBS_REMOTE_REPOSITORY:-}" ] && [ "$REPOSITORY" != "$PBS_REMOTE_REPOSITORY" ]; then
+    die "repository '$REPOSITORY' does not match PBS_REMOTE_REPOSITORY ($CONFIG_FILE)."
+fi
+if [ -n "${PBS_REMOTE_FINGERPRINT:-}" ] && [ "${FINGERPRINT^^}" != "${PBS_REMOTE_FINGERPRINT^^}" ]; then
+    die "fingerprint does not match PBS_REMOTE_FINGERPRINT ($CONFIG_FILE)."
+fi
+if [ -z "${PBS_REMOTE_ALLOWED_PATHS:-}" ] || [ -z "${PBS_REMOTE_FINGERPRINT:-}" ]; then
+    echo "WARNING: set PBS_REMOTE_ALLOWED_PATHS and PBS_REMOTE_FINGERPRINT in $CONFIG_FILE (see the header of this wrapper)." >&2
+fi
+
 if [ -n "${PBS_REMOTE_ALLOWED_PATHS:-}" ]; then
     allowed=false
     for prefix in $PBS_REMOTE_ALLOWED_PATHS; do
