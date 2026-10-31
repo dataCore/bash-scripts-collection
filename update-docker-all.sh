@@ -37,8 +37,9 @@ export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 set -euo pipefail
 trap 'echo -e "\n❌ Error in Line $LINENO. Update Script canceled."; exit 1' ERR
 # =======================================================================
-ALLCONTAINER=$(docker ps --format '{{.Names}}')
-ALLPROJECTS=$(for i in $ALLCONTAINER; do docker inspect --format '{{ index .Config.Labels "com.docker.compose.project"}}' "$i"; done | sort -u)
+# Straight from docker ps: no inspect per container, which fails (and
+# under pipefail ended the whole run) when a container exits meanwhile
+ALLPROJECTS=$(docker ps --format '{{.Label "com.docker.compose.project"}}' | { grep -v '^$' || true; } | sort -u)
 ### Do the stuff
 # A failing project must not abort the remaining updates – collect failures
 # and report them at the end with a non-zero exit code for monitoring.
@@ -49,7 +50,8 @@ for PROJECTNAME in $ALLPROJECTS; do
         FAILED_PROJECTS+=("$PROJECTNAME")
     fi
 done
-docker image prune -f
+# A failed prune must not hide the list of failed projects below
+docker image prune -f || echo "⚠️  docker image prune failed"
 echo "Script to update all Docker Compose Projects completed"
 # =======================================================================
 echo "===============> End of update-docker-all SCRIPT for: '${HOSTNAME}' "

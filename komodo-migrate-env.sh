@@ -54,7 +54,8 @@ import json, re, sys
 
 env_path, config_path, prefix = sys.argv[1:]
 prefix = re.sub(r"[^A-Z0-9]+", "_", prefix.upper()).strip("_")
-secret_name = re.compile(r"(TOKEN|SECRET|PASSWORD|PASS|_KEY)$")
+# Anywhere in the name: SECRET_KEY_BASE, DB_PASSWD, API_KEY_FILE, ...
+secret_name = re.compile(r"TOKEN|SECRET|PASSW|PWD|PASS$|_KEY|APIKEY|CREDENTIAL|PRIVATE")
 # A URL with user:password (DATABASE_URL, REDIS_URL, ...) is a secret too
 secret_value = re.compile(r"://[^/]*:[^@]*@")
 interpolation = re.compile(r"\$\{[^}]*\}")
@@ -103,6 +104,7 @@ with open(config_path) as f:
 known = set(re.findall(r"^([A-Za-z0-9_]+)\s*=", config.split("[secrets]", 1)[1], re.M))
 
 secrets, environment = [], []
+pending = {}
 with open(env_path) as f:
     for line in f:
         m = line_re.match(line)
@@ -113,7 +115,12 @@ with open(env_path) as f:
         if value and (secret_name.search(key) or secret_value.search(value)):
             name = f"{prefix}_{key}"
             environment.append(f"{key}=" + quoted(key, f"[[{name}]]", value, literal))
-            if name not in known:
+            # A key defined twice in .env would be a duplicate TOML key, which
+            # Periphery refuses to parse; compose takes the last one, so do we
+            if name in pending:
+                secrets[pending[name]] = f"{name} = {json.dumps(value)}"
+            elif name not in known:
+                pending[name] = len(secrets)
                 secrets.append(f"{name} = {json.dumps(value)}")
         else:
             environment.append(f"{key}=" + quoted(key, value, value, literal))
@@ -147,8 +154,12 @@ for _ in $(seq 1 15); do
   esac
 done
 if [ "$active" -lt 3 ]; then
+    # Periphery down means Komodo loses the host: put the old config back
     echo "error: periphery is not active after the restart; see 'journalctl -u periphery'." >&2
-    echo "       Previous config: $backup" >&2
+    cp -a "$CONFIG" "${CONFIG}.failed-$(date +%Y%m%d%H%M%S)"
+    cp -a "$backup" "$CONFIG"
+    systemctl restart periphery || true
+    echo "       Restored the previous config and restarted periphery; the rejected one is ${CONFIG}.failed-*." >&2
     exit 1
 fi
 echo "Periphery restarted" >&2

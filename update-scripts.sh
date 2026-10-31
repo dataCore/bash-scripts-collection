@@ -8,11 +8,16 @@ if ! timeout 120 git -C "$REPO" fetch origin "$BRANCH"; then
     exit 1
 fi
 
+# Pin the fetched commit: a concurrent run (cron, check-cve, update-system,
+# update-docker-all all call this script) could move origin/$BRANCH between
+# the signature check and the reset.
+REV=$(git -C "$REPO" rev-parse "origin/$BRANCH") || exit 1
+
 # Opt-in signature check: once gpg.ssh.allowedSignersFile is configured
 # (repository or system git config), only a signed commit from a listed key
 # is accepted.
 if [ -n "$(git -C "$REPO" config --get gpg.ssh.allowedSignersFile)" ]; then
-    if git -C "$REPO" verify-commit "origin/$BRANCH"; then
+    if git -C "$REPO" verify-commit "$REV"; then
         echo "Signature of origin/$BRANCH verified."
     else
         echo "ERROR: signature of origin/$BRANCH could not be verified. Repository left unchanged."
@@ -23,12 +28,12 @@ fi
 # Same semantics as before: local changes are discarded, but say so only
 # when there are any (modified tracked files or local commits).
 if [ -n "$(git -C "$REPO" status --porcelain --untracked-files=no)" ] ||
-    [ -n "$(git -C "$REPO" rev-list "origin/$BRANCH..HEAD")" ]; then
+    [ -n "$(git -C "$REPO" rev-list "$REV..HEAD")" ]; then
     echo "WARNING: local changes in $REPO are discarded."
 fi
 
 # --quiet: git's own "HEAD is now at ..." line is replaced by the message below
-if git -C "$REPO" reset --quiet --hard "origin/$BRANCH"; then
+if git -C "$REPO" reset --quiet --hard "$REV"; then
     echo "Repository is at origin/$BRANCH ($(git -C "$REPO" log -1 --format='%h %s'))."
 else
     echo "ERROR: git reset --hard origin/$BRANCH failed."

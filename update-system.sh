@@ -187,6 +187,18 @@ if [ -n "$(dpkg --audit)" ]; then
     done
 fi
 
+# A Docker upgrade restarts dockerd and -y may reboot: neither must hit a
+# running backup-docker-all (containers it stopped stay down) or
+# update-docker-all. Same lock as those two; held until the script ends,
+# so also through the reboot.
+if command -v docker >/dev/null 2>&1; then
+    exec 9>/run/lock/datacore-docker.lock
+    if ! flock -w 3600 9; then
+        echo "Error: /run/lock/datacore-docker.lock still held by a backup/update run after 1 h. No upgrade, no reboot."
+        exit 1
+    fi
+fi
+
 # Start update
 if ! apt-get -o DPkg::Lock::Timeout=600 update; then
     echo "Error: apt-get update failed."

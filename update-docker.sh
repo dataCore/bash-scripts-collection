@@ -251,11 +251,18 @@ echo -n "🔍 Checking for newer Docker images for '${PROJECTNAME}'..."
 declare -A REMOTE_DIGESTS=()
 declare -A PULLED_IMAGES=()
 PULL_SERVICES=()
+RUNNING_SERVICES=()
+SKIPPED_IMAGES=()
 UPDATE_NEEDED=false
 for CONTAINER in $ALLCONTAINER; do
-    IMAGE=$(docker inspect --format='{{.Config.Image}}' "$CONTAINER")
-    SERVICE=$(docker inspect --format '{{ index .Config.Labels "com.docker.compose.service"}}' "$CONTAINER")
-    RUNNING_IMAGE_ID=$(docker inspect --format='{{.Image}}' "$CONTAINER")
+    # One inspect per container; one that is gone meanwhile is skipped
+    if ! CONTINFO=$(docker inspect \
+        --format '{{.Config.Image}}|{{ index .Config.Labels "com.docker.compose.service"}}|{{.Image}}' \
+        "$CONTAINER" 2>/dev/null); then
+        continue
+    fi
+    IFS='|' read -r IMAGE SERVICE RUNNING_IMAGE_ID <<<"$CONTINFO"
+    RUNNING_SERVICES+=("$SERVICE")
 
     # Container running an older image than the local tag → recreate needed
     LOCAL_IMAGE_ID=$(docker image inspect --format '{{.Id}}' "$IMAGE" 2>/dev/null || true)
@@ -281,16 +288,24 @@ for CONTAINER in $ALLCONTAINER; do
 
     if [ -z "$REMOTE_DIGEST" ]; then
         parse_image_ref "$IMAGE"
-        if [ "$REF_REGISTRY" = "registry-1.docker.io" ]; then
-            # A pull would only burn the rate limit the HEAD check avoids
+        # A pull would only burn the rate limit the HEAD check avoids –
+        # unless the host is logged in to Docker Hub: then it is most likely
+        # a private repository, which the anonymous token cannot see.
+        if [ "$REF_REGISTRY" = "registry-1.docker.io" ] &&
+            ! grep -qs '"https://index.docker.io/v1/"' "${DOCKER_CONFIG:-/root/.docker}/config.json"; then
             echo -en "\n⚠️  Could not query Docker Hub for '${IMAGE}', skipped."
+            SKIPPED_IMAGES+=("$IMAGE")
             continue
         fi
         # Private or basic-auth registry: fall back to a pull with the
         # host's credentials, once per image
         if [ -z "${PULLED_IMAGES[$IMAGE]+set}" ]; then
             PULLED_IMAGES[$IMAGE]=1
-            docker pull "$IMAGE" >/dev/null 2>&1 || continue
+            if ! docker pull "$IMAGE" >/dev/null 2>&1; then
+                echo -en "\n⚠️  Could not pull '${IMAGE}', skipped."
+                SKIPPED_IMAGES+=("$IMAGE")
+                continue
+            fi
         fi
         LATEST_IMAGE_ID=$(docker image inspect --format '{{.Id}}' "$IMAGE")
         if [ "$RUNNING_IMAGE_ID" != "$LATEST_IMAGE_ID" ]; then
@@ -331,8 +346,19 @@ if [ "$UPDATE_NEEDED" = true ]; then
         mapfile -t PULL_SERVICES < <(printf '%s\n' "${PULL_SERVICES[@]}" | sort -u)
         "${COMPOSE[@]}" pull "${PULL_SERVICES[@]}"
     fi
-    "${COMPOSE[@]}" up -d
+    # Only the services that were running: a service stopped on purpose or a
+    # finished one-shot (migration, init) must not be started by an update
+    mapfile -t RUNNING_SERVICES < <(printf '%s\n' "${RUNNING_SERVICES[@]}" | sort -u)
+    "${COMPOSE[@]}" up -d --no-deps "${RUNNING_SERVICES[@]}"
     printf "✅ '%s' updated.\n" "$PROJECTNAME"
 else
     printf " ✅ All up to date!\n"
+fi
+
+# An image that could not be checked is never updated: say so in the exit
+# code, so update-docker-all lists the project
+if [ "${#SKIPPED_IMAGES[@]}" -gt 0 ]; then
+    mapfile -t SKIPPED_IMAGES < <(printf '%s\n' "${SKIPPED_IMAGES[@]}" | sort -u)
+    echo "⚠️  Not checked: ${SKIPPED_IMAGES[*]}"
+    exit 1
 fi

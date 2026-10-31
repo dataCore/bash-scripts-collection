@@ -99,8 +99,9 @@ elif [ "$WRAPPER_RC" -eq 0 ]; then
     STDIN_DATA="$PBS_PASSWORD"
 else
     echo "WARNING: DEPRECATED – $WRAPPER is not installed on $REMOTE_IP."
-    echo "         Using the old invocation: the PBS password is in the remote command"
-    echo "         line, and its sudoers rule lets $USER run any command as root."
+    echo "         Using the old invocation: the PBS password is in the command line of"
+    echo "         the local ssh process and of the remote command (visible in ps on both"
+    echo "         hosts), and its sudoers rule lets $USER run any command as root."
     echo "         Install the wrapper and its sudoers rule (see the header of this script)."
     REMOTE_CMD="sudo -n /usr/bin/env PBS_PASSWORD=$(printf '%q' "$PBS_PASSWORD") PBS_FINGERPRINT=$(printf '%q' "$PBS_FINGERPRINT")"
     REMOTE_CMD+=" /usr/bin/proxmox-backup-client backup $(printf '%q' "${ARCHIVE}:${REMOTE_PATH}")"
