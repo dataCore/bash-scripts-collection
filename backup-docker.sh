@@ -223,10 +223,20 @@ run_tar() {
 
 # Tar one named volume into OUTPUT. Usage: backup_volume <volume> <label>
 backup_volume() {
-    local vol="$1" label="$2" volumedir output start
-    volumedir="${DOCKERROOTDIR}/volumes/${vol}"
-    if [ ! -d "$volumedir" ]; then
-        echo "  ⚠️  Volume dir not found, skipping: $volumedir"
+    local vol="$1" label="$2" volumedir device output start
+    # Docker's own Mountpoint, not a path under DockerRootDir: plugin drivers
+    # keep their data elsewhere.
+    IFS='|' read -r volumedir device < <(docker volume inspect \
+        --format '{{.Mountpoint}}|{{index .Options "device"}}' "$vol" 2>/dev/null || true)
+    if [ -z "$volumedir" ] || [ ! -d "$volumedir" ]; then
+        fail_item "Volume '${vol}': data dir not found (${volumedir:-no mountpoint}), not backed up."
+        return 0
+    fi
+    # A local volume with driver_opts (nfs, cifs, bind device) is mounted on
+    # _data only while a container uses it; tarring the bare dir would store an
+    # empty archive as the newest copy.
+    if [ -n "$device" ] && [ "$device" != "<no value>" ] && ! mountpoint -q "$volumedir"; then
+        fail_item "Volume '${vol}': device '${device}' is not mounted (container stopped?), not backed up."
         return 0
     fi
     start=$(date +%s)
@@ -294,7 +304,6 @@ HOSTNAME="$(hostname)"
 TIMESTAMP=$(date +"%Y%m%d_%H%M")
 PROJECTNAME=$(echo "${1:-$(basename "$PWD")}" | tr '[:upper:]' '[:lower:]')
 BACKUPDURATIONDAYS=${3:-2}
-DOCKERROOTDIR=$(docker info --format '{{ .DockerRootDir }}')
 FAILURES=()
 CURRENT_PART=""
 STOPPED_CONTAINER=""
@@ -326,9 +335,10 @@ mkdir -p "$PROJECTBACKUPDIR"
 TEMPDIR=$(mktemp -d "/var/tmp/backup-docker.${PROJECTNAME}.XXXXXX")
 
 # --- RESOLVE COMPOSE WORKING DIR ---
-WORKINGDIR=$(for i in $ALLCONTAINER; do
-    docker inspect --format '{{ index .Config.Labels "com.docker.compose.project.working_dir"}}' "$i"
-done | sort -u | head -n 1)
+# One call; a container that is gone meanwhile only drops out of the list
+# shellcheck disable=SC2086  # ALLCONTAINER is a list of IDs
+WORKINGDIR=$({ docker inspect --format '{{ index .Config.Labels "com.docker.compose.project.working_dir"}}' \
+    $ALLCONTAINER 2>/dev/null || true; } | { grep -v '^$' || true; } | sort -u | head -n 1)
 
 if [ -z "$WORKINGDIR" ] || [ ! -d "$WORKINGDIR" ]; then
     echo "❌ Could not determine working directory for project '${PROJECTNAME}'."
@@ -371,8 +381,13 @@ fi
 declare -A VOL_DONE=()
 
 for cont in $ALLCONTAINER; do
-    IMAGE=$(docker inspect --format '{{.Config.Image}}' "$cont" 2>/dev/null)
-    CONTAINERNAME=$(docker inspect --format '{{.Name}}' "$cont" 2>/dev/null | sed 's|^/||')
+    # Job containers (compose run --rm, CI runners) can vanish since 'docker ps'
+    if ! CONTINFO=$(docker inspect --format '{{.Config.Image}}|{{.Name}}' "$cont" 2>/dev/null); then
+        echo "  ⏭️  ${cont}: container is gone, skipped"
+        continue
+    fi
+    IMAGE="${CONTINFO%%|*}"
+    CONTAINERNAME="${CONTINFO#*|/}"
     # Opt-out per container: label datacore.backup.ignore=true skips all of its
     # volumes (e.g. a search index that can be rebuilt from the primary data).
     BACKUP_IGNORE=$(container_label "$cont" datacore.backup.ignore)

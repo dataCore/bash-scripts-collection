@@ -68,8 +68,9 @@ if [ -z "$BACKUPMOUNT" ] || [ "$BACKUPMOUNT" == "/" ]; then
     fi
 fi
 # =======================================================================
-ALLCONTAINER=$(docker ps --format '{{.Names}}')
-ALLPROJECTS=$(for i in $ALLCONTAINER; do docker inspect --format '{{ index .Config.Labels "com.docker.compose.project"}}' "$i"; done | sort -u)
+# Straight from docker ps: no inspect per container, which fails (and
+# under pipefail ended the whole run) when a job container exits meanwhile
+ALLPROJECTS=$(docker ps --format '{{.Label "com.docker.compose.project"}}' | { grep -v '^$' || true; } | sort -u)
 ### Do the stuff
 # A failing project must not abort the remaining backups – collect failures
 # and report them at the end with a non-zero exit code for monitoring.
@@ -96,24 +97,29 @@ if [ -n "$PBS_REPO" ]; then
     START_PBS=$(date +%s)
     echo "🚀 Uploading to PBS: $HOSTNAME (All Projects)..."
 
-    # nano ~/.bashrc
-    # export PBS_PASSWORD="Dein_LXC_Passwort"
-    # export PBS_FINGERPRINT="Dein:LXC:Fingerprint:von:vorhin"
-    # source ~/.bashrc
+    # PBS_PASSWORD and PBS_FINGERPRINT must be in the environment of the
+    # cron job (crontab variables or an env file it sources): cron does not
+    # read ~/.bashrc.
 
     # Archiv: hostname.pxar – only this host's dir: BACKUPDIR may be a share
-    # that other hosts back up to as well
-    proxmox-backup-client backup \
+    # that other hosts back up to as well. A failed upload is reported with
+    # the failed projects below, not by the ERR trap before them.
+    if proxmox-backup-client backup \
         "${HOSTNAME}.pxar:${BACKUPDIR}/${HOSTNAME}" \
         --repository "$PBS_REPO" \
-        --quiet
-
-    END_PBS=$(date +%s)
-    echo "✅ PBS upload completed in $((END_PBS - START_PBS))s"
+        --quiet; then
+        END_PBS=$(date +%s)
+        echo "✅ PBS upload completed in $((END_PBS - START_PBS))s"
+    else
+        echo "❌ PBS upload to ${PBS_REPO} failed"
+        PBS_FAILED=1
+    fi
 fi
 # =======================================================================
 echo "===============> End of backup-docker-all SCRIPT for: '${HOSTNAME}' "
 if [ "${#FAILED_PROJECTS[@]}" -gt 0 ]; then
     echo "❌ Failed projects: ${FAILED_PROJECTS[*]}"
+fi
+if [ "${#FAILED_PROJECTS[@]}" -gt 0 ] || [ "${PBS_FAILED:-0}" -eq 1 ]; then
     exit 1
 fi

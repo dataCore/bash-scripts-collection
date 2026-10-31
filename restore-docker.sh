@@ -439,6 +439,16 @@ if [[ "$TYPE" != compose && "$TYPE" != volume ]]; then
             ')
         fi
 
+        # Default compose v2 name <project>-<service>-<n>: the case after
+        # 'docker compose down', which the PostgreSQL restore asks for
+        if [ -z "$SERVICENAME" ]; then
+            CANDIDATE="${CONTAINERNAME#"${PROJECTNAME}"-}"
+            CANDIDATE="${CANDIDATE%-[0-9]*}"
+            if dc config --services 2>/dev/null | grep -qxF "$CANDIDATE"; then
+                SERVICENAME="$CANDIDATE"
+            fi
+        fi
+
         if [ -z "$SERVICENAME" ]; then
             SERVICENAME="$CONTAINERNAME"
             echo "⚠️  Could not resolve service name for '${CONTAINERNAME}', using as-is."
@@ -456,8 +466,20 @@ fi
 # RESTORE DOCKER COMPOSE CONFIG
 if [ "$TYPE" == compose ]; then
     echo "📦 Restoring Docker Compose config..."
+    # Overwrites docker-compose.yml, .env & co. in place: ask, and keep the
+    # current files like the volume restore keeps the old volume.
+    read -r -p "⚠️  Overwrite the files in '$PWD' with the backup? The current ones are saved first. (y/n): " CONFIRM
+    if [[ "$CONFIRM" != "y" && "$CONFIRM" != "Y" ]]; then
+        echo "❌ Restore cancelled."
+        exit 1
+    fi
+    SAVEDIR="/var/backups/restore-docker"
+    SAVEFILE="${SAVEDIR}/${PROJECTNAME}.compose-before-restore-$(date +%Y%m%d_%H%M%S).tar.gz"
+    install -d -m 700 "$SAVEDIR"
+    tar -czf "$SAVEFILE" -C "$PWD" .
     tar -xzf "$SELECTED" -C "$PWD"
     echo "✅ Compose config restored to $PWD"
+    echo "ℹ️  The previous files are in ${SAVEFILE}"
 
 # =======================================================================
 # RESTORE MariaDB / MySQL
@@ -776,7 +798,12 @@ elif [ "$TYPE" == volume ]; then
     if [ -n "$OLDDIR" ]; then
         mv "$TARGETDIR" "$OLDDIR"
     fi
-    mv "$STAGINGDIR" "$TARGETDIR"
+    if ! mv "$STAGINGDIR" "$TARGETDIR"; then
+        [ -n "$OLDDIR" ] && mv "$OLDDIR" "$TARGETDIR"
+        echo "❌ Could not move the restored data into place; '${TARGETDIR}' is unchanged."
+        echo "   The extracted data is still in '${STAGINGDIR}'."
+        exit 1
+    fi
     echo "✅ Volume restored to $TARGETDIR"
     if [ -n "$OLDDIR" ]; then
         echo "ℹ️  The previous content is in '${OLDDIR}'. Docker may list it as a volume"
