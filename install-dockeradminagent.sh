@@ -75,6 +75,22 @@ if [ ! -f "$CONFIG" ] && { [ -z "$core_public_key" ] || [ -z "$core_ips" ]; }; t
   exit 1
 fi
 
+# A typo here would end up in the config and stay there: re-runs keep it.
+if [ -n "$core_ips" ]; then
+  for ip in $(printf '%s' "$core_ips" | tr ',' ' '); do
+    case "$ip" in
+      *[!0-9a-fA-F.:/]* | '') echo "error: --core-ip: invalid address '$ip'" >&2; exit 1 ;;
+    esac
+  done
+  case "$core_ips" in
+    ,* | *, | *,,*) echo "error: --core-ip: empty entry in '$core_ips'" >&2; exit 1 ;;
+  esac
+fi
+if [ -f "$CONFIG" ] && { [ -n "$core_public_key" ] || [ -n "$core_ips" ]; }; then
+  echo "error: $CONFIG exists and is never overwritten; edit it, or remove it to apply --core-ip/--core-public-key" >&2
+  exit 1
+fi
+
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 

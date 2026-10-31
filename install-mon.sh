@@ -226,6 +226,8 @@ ensure_zabbix_repo() {
     esac
 
     if ! command -v wget &>/dev/null; then
+        # A fresh image or LXC may have empty package lists
+        apt_update
         DEBIAN_FRONTEND=noninteractive apt-get install -y -qq wget
     fi
 
@@ -289,20 +291,26 @@ step_install_zabbix() {
 step_generate_psk() {
     print_section "PSK Key"
 
-    if [[ -f "$ZABBIX_PSK_FILE" ]]; then
+    # The key is shown in step_summary only: info/ok also write to LOG_FILE.
+    # -s: an empty file left by an interrupted run is replaced, not reused.
+    if [[ -s "$ZABBIX_PSK_FILE" ]]; then
         PSK_KEY=$(cat "$ZABBIX_PSK_FILE")
-        ok "Existing PSK key found — reusing"
-        info "Key: ${BOLD}${PSK_KEY}${NC}"
+        ok "Existing PSK key found in ${ZABBIX_PSK_FILE} — reusing"
         return
     fi
 
     # Generate 256-bit (32 byte) random PSK
     PSK_KEY=$(openssl rand -hex 32)
 
-    install -m 640 -o zabbix -g zabbix /dev/null "$ZABBIX_PSK_FILE"
-    echo "$PSK_KEY" > "$ZABBIX_PSK_FILE"
+    # Written next to the target and moved in place, so the key file is
+    # either complete or absent.
+    local tmp
+    tmp=$(mktemp "${ZABBIX_PSK_FILE}.XXXXXX")
+    echo "$PSK_KEY" >"$tmp"
+    chown zabbix:zabbix "$tmp"
+    chmod 640 "$tmp"
+    mv -f "$tmp" "$ZABBIX_PSK_FILE"
     ok "PSK key generated and saved to ${ZABBIX_PSK_FILE}"
-    info "Key: ${BOLD}${PSK_KEY}${NC}"
 }
 
 # =============================================================================

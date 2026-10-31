@@ -360,10 +360,12 @@ restore_package_config() {
     done
 
     # Otherwise let dpkg put the conffile back: it only restores a *missing*
-    # conffile, and only when told to (--force-confmiss).
+    # conffile, and only when told to (--force-confmiss). Pinned to the
+    # installed version: this script never upgrades Fluent Bit.
     rm -f "$PKG_CONF"
     if DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --reinstall \
-        -o Dpkg::Options::=--force-confmiss fluent-bit &>/dev/null \
+        -o Dpkg::Options::=--force-confmiss \
+        "fluent-bit=$(dpkg-query -W -f='${Version}' fluent-bit)" &>/dev/null \
         && [[ -f "$PKG_CONF" ]]; then
         ok "Package config restored by reinstalling fluent-bit"
     else
@@ -544,6 +546,45 @@ step_deploy_confd() {
     fi
 }
 
+# The files steps 3 and 4 overwrite. They are saved before and put back
+# when the new config fails validation, so a rejected config never reaches
+# the next service restart or reboot.
+CONFIG_SNAPSHOT=""
+snapshot_config() {
+    CONFIG_SNAPSHOT=$(mktemp -d)
+    local f
+    for f in "$DC_ENV" "$DC_CONF" "$DC_PARSERS" "$CONFD"; do
+        [[ -e "$f" ]] && cp -a --parents "$f" "$CONFIG_SNAPSHOT"
+    done
+    return 0
+}
+
+restore_config() {
+    local f
+    for f in "$DC_ENV" "$DC_CONF" "$DC_PARSERS" "$CONFD"; do
+        rm -rf "$f"
+        if [[ -e "${CONFIG_SNAPSHOT}${f}" ]]; then
+            cp -a "${CONFIG_SNAPSHOT}${f}" "$f"
+        fi
+    done
+}
+
+# Runs before the drop-in, daemon.json and the service are touched.
+step_validate_config() {
+    print_section "Validating Config"
+
+    # Same environment systemd will provide, so the dry-run sees real values
+    if o2_user="$O2_USER" o2_passwd="$O2_PASSWD" \
+        "$FB_BIN" -c "$DC_CONF" --dry-run &>/dev/null; then
+        ok "Configuration validated successfully"
+        rm -rf "$CONFIG_SNAPSHOT"
+    else
+        restore_config
+        rm -rf "$CONFIG_SNAPSHOT"
+        die "Configuration validation failed — previous config restored. Test: ${FB_BIN} -c ${DC_CONF} --dry-run"
+    fi
+}
+
 # proxmox.conf kept its tail DB in /var/log until 2026-10; it belongs in
 # /var/lib/fluent-bit with the other state. Copy the old DB over so the
 # offsets survive and task lines already shipped are not sent again.
@@ -636,7 +677,7 @@ step_configure_docker() {
         cp "$DAEMON_JSON" "${DAEMON_JSON}.bak.$(date +%Y%m%d%H%M%S)"
         warn "Existing daemon.json backed up"
         python3 - <<PYEOF
-import json
+import json, os
 with open('${DAEMON_JSON}') as f:
     cfg = json.load(f)
 cfg['log-driver'] = 'fluentd'
@@ -645,8 +686,10 @@ cfg['log-opts'] = {
     'tag': 'docker.{{.Name}}',
     'fluentd-async': 'true'
 }
-with open('${DAEMON_JSON}', 'w') as f:
+# Temp file + rename: a failed write never leaves a truncated daemon.json
+with open('${DAEMON_JSON}.tmp', 'w') as f:
     json.dump(cfg, f, indent=2)
+os.replace('${DAEMON_JSON}.tmp', '${DAEMON_JSON}')
 PYEOF
     else
         cat > "$DAEMON_JSON" <<EOF
@@ -669,14 +712,6 @@ EOF
 # =============================================================================
 step_enable_fluent_bit() {
     print_section "Enabling Fluent Bit Service"
-
-    # Same environment systemd will provide, so the dry-run sees real values
-    if o2_user="$O2_USER" o2_passwd="$O2_PASSWD" \
-        "$FB_BIN" -c "$DC_CONF" --dry-run &>/dev/null; then
-        ok "Configuration validated successfully"
-    else
-        die "Configuration validation failed. Check ${DC_CONF}"
-    fi
 
     if $OPT_PROXMOX; then
         migrate_proxmox_db
@@ -769,8 +804,10 @@ main() {
     step_detect_network
     step_get_credentials
     step_install_fluent_bit
+    snapshot_config
     step_deploy_config
     step_deploy_confd
+    step_validate_config
     step_service_override
     step_configure_docker
     step_enable_fluent_bit

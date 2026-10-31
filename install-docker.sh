@@ -533,7 +533,9 @@ step_configure_daemon() {
         warn "Existing daemon.json differs — backed up and updating"
     fi
 
-    echo "$merged" > "$DAEMON_JSON"
+    # Temp file + rename: a failed write never leaves a truncated daemon.json
+    echo "$merged" >"${DAEMON_JSON}.tmp"
+    mv -f "${DAEMON_JSON}.tmp" "$DAEMON_JSON"
     DAEMON_CHANGED=true
     ok "daemon.json written to ${DAEMON_JSON}"
 
