@@ -24,9 +24,10 @@
 
 set -euo pipefail
 
-# --------------- Colors -------------------------------------------------------
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
-BLUE='\033[0;34m'; CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
+# Output helpers, log and apt_update (lib/common.sh)
+LOG_TAG="install-mon"
+# shellcheck source=lib/common.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib/common.sh"
 
 # --------------- Config -------------------------------------------------------
 ZABBIX_AGENT_CONF="/etc/zabbix/zabbix_agent2.conf"
@@ -41,44 +42,10 @@ ZABBIX_VERSION="7.0"      # overridden by --zabbix-version
 # Helpers
 # =============================================================================
 
-log() { echo "$(date '+%Y-%m-%d %H:%M:%S') [install-mon] $*" >> "$LOG_FILE"; }
-
-print_header() {
-    clear
-    echo -e "${CYAN}${BOLD}"
-    echo "  ╔══════════════════════════════════════════════════════════╗"
-    echo "  ║         dataCore — Zabbix Agent2 Installation            ║"
-    echo "  ╚══════════════════════════════════════════════════════════╝"
-    echo -e "${NC}"
-}
-
-print_section() {
-    echo ""
-    echo -e "${BLUE}${BOLD}▶ $1${NC}"
-    echo -e "${BLUE}$(printf '─%.0s' {1..60})${NC}"
-}
-
-ok()   { echo -e "  ${GREEN}✓${NC}  $1"; log "[OK]   $1"; }
-info() { echo -e "  ${CYAN}ℹ${NC}  $1"; log "[INFO] $1"; }
-warn() { echo -e "  ${YELLOW}⚠${NC}  $1"; log "[WARN] $1"; }
-err()  { echo -e "  ${RED}✗${NC}  $1"; log "[ERR]  $1"; }
-die()  { err "$1"; echo ""; exit 1; }
 
 # Run `apt-get update` but do not abort the whole install if an unrelated
 # third-party repository (e.g. a misconfigured Docker repo) is broken — we
 # verify the package we actually need is available before installing.
-apt_update() {
-    local errfile
-    errfile=$(mktemp)
-    if apt-get update -qq 2>"$errfile"; then
-        rm -f "$errfile"
-        return 0
-    fi
-    warn "apt-get update reported errors — likely a broken third-party repo:"
-    grep -E '^(E|W):' "$errfile" | sed 's/^/      /' || sed 's/^/      /' "$errfile"
-    rm -f "$errfile"
-    return 0
-}
 
 # =============================================================================
 # Pre-flight
@@ -457,10 +424,9 @@ step_summary() {
 
 main() {
     check_root
-    mkdir -p "$(dirname "$LOG_FILE")"
-    echo "=== install-mon.sh === $(date)" >> "$LOG_FILE"
+    log_init
 
-    print_header
+    print_header "dataCore — Zabbix Agent2 Installation"
     check_args "$@"
     step_install_zabbix
     step_generate_psk

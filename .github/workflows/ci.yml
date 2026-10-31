@@ -14,30 +14,34 @@ on:
 permissions: read-all
 
 jobs:
-  lint:
+  # Every finding fails the run: the scripts run as root on every host.
+  shellcheck:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v5.0.0
-        with:
-          fetch-depth: 0
-      - name: Megalinter
-        continue-on-error: true
-        uses: oxsecurity/megalinter@e08c2b05e3dbc40af4c23f41172ef1e068a7d651
-        env:
-          APPLY_FIXES: "none"
-          BASH_SHFMT_OPTIONS: "-i 4 -ci"
-          BASH_SHFMT_DISABLE_ERRORS: "false"
-          DISABLE_LINTERS: MARKDOWN_MARKDOWN_LINK_CHECK,REPOSITORY_CHECKOV,REPOSITORY_SECRETLINT,REPOSITORY_TRIVY,REPOSITORY_TRUFFLEHOG,SPELL_CSPELL,SPELL_LYCHEE
-          FILTER_REGEX_EXCLUDE: .*/ISSUE_TEMPLATE/.*
-          FLAVOR_SUGGESTIONS: "false"
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          JSON_PRETTIER_DISABLE_ERRORS: "false"
-          LOG_LEVEL: WARN
-          MARKDOWN_MARKDOWNLINT_DISABLE_ERRORS: "false"
-          PRINT_ALL_FILES: "false"
-          PRINT_ALPACA: "false"
-          SHOW_ELAPSED_TIME: "true"
-          SPELL_MISSPELL_DISABLE_ERRORS: "true"
-          VALIDATE_ALL_CODEBASE: "true"
-          YAML_PRETTIER_DISABLE_ERRORS: "false"
+      - name: Syntax
+        run: |
+          for f in *.sh lib/*.sh; do
+            [ -f "$f" ] || continue
+            case "$(head -n 1 "$f")" in
+              *bash*) bash -n "$f" ;;
+              *) sh -n "$f" ;;
+            esac
+          done
+      - name: shellcheck
+        # -x follows the `source` of lib/common.sh
+        run: shellcheck --version && shellcheck -x *.sh lib/*.sh
+
+  psscriptanalyzer:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5.0.0
+      - name: PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          Install-Module PSScriptAnalyzer -Force -Scope CurrentUser
+          $r = Invoke-ScriptAnalyzer -Path . -Recurse -Severity Error
+          $r | Format-Table -AutoSize
+          if ($r) { exit 1 }

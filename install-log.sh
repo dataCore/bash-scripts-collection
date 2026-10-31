@@ -69,9 +69,10 @@
 
 set -euo pipefail
 
-# --------------- Colors -------------------------------------------------------
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
-BLUE='\033[0;34m'; CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
+# Output helpers, log and apt_update (lib/common.sh)
+LOG_TAG="install-log"
+# shellcheck source=lib/common.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib/common.sh"
 
 # --------------- Paths --------------------------------------------------------
 PKG_CONF="/etc/fluent-bit/fluent-bit.conf"      # package conffile — never edited
@@ -124,30 +125,6 @@ DOCKER_CHANGED=false    # daemon.json was written by this run
 # Tolerate a non-writable log (e.g. an arg error hit as a normal user).
 # The writability test has to come first: a failing >> redirect reports to the
 # terminal before an inline 2>/dev/null would take effect.
-log() {
-    [[ -w "$LOG_FILE" || ( ! -e "$LOG_FILE" && -w "$(dirname "$LOG_FILE")" ) ]] || return 0
-    echo "$(date '+%Y-%m-%d %H:%M:%S') [install-log] $*" >> "$LOG_FILE"
-}
-print_header() {
-    clear
-    echo -e "${CYAN}${BOLD}"
-    echo " ╔══════════════════════════════════════════════════════════╗"
-    echo " ║      dataCore — Fluent Bit Log Agent Installation        ║"
-    echo " ╚══════════════════════════════════════════════════════════╝"
-    echo -e "${NC}"
-}
-print_section() {
-    echo ""
-    echo -e "${BLUE}${BOLD}▶ $1${NC}"
-    echo -e "${BLUE}$(printf '─%.0s' {1..60})${NC}"
-}
-ok()    { echo -e "  ${GREEN}✓${NC} $1"; log "[OK] $1"; }
-info()  { echo -e "  ${CYAN}ℹ${NC} $1"; log "[INFO] $1"; }
-warn()  { echo -e "  ${YELLOW}⚠${NC} $1"; log "[WARN] $1"; }
-err()   { echo -e "  ${RED}✗${NC} $1"; log "[ERR] $1"; }
-die()   { err "$1"; echo ""; exit 1; }
-cmd()   { echo -e "    ${CYAN}$1${NC}"; }
-
 usage() {
     # Print the header comment block only: start at the first comment line
     # after the shebang, stop at the first non-comment line after that.
@@ -158,17 +135,6 @@ usage() {
 # Run `apt-get update` but do not abort the whole install if an unrelated
 # third-party repository is broken — we verify the package we actually need
 # is available before installing.
-apt_update() {
-    local errfile="/tmp/datacore-apt-update.$$"
-    if apt-get update -qq 2>"$errfile"; then
-        rm -f "$errfile"
-        return 0
-    fi
-    warn "apt-get update reported errors — likely a broken third-party repo:"
-    grep -E '^(E|W):' "$errfile" | sed 's/^/      /' || sed 's/^/      /' "$errfile"
-    rm -f "$errfile"
-    return 0
-}
 
 # =============================================================================
 # Parse Arguments
@@ -796,11 +762,9 @@ main() {
 
     [[ "$EUID" -eq 0 ]] || die "This script must be run as root."
 
-    mkdir -p "$(dirname "$LOG_FILE")"
-    echo "=== install-log.sh === $(date)" >> "$LOG_FILE"
+    log_init
 
-    print_header
-
+    print_header "dataCore — Fluent Bit Log Agent Installation"
     step_detect_network
     step_get_credentials
     step_install_fluent_bit

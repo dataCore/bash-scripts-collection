@@ -89,6 +89,7 @@ the `.ps1` files (`link.sh` only links what it lists).
 |---|---|---|
 | `logconfs/` | `install-log.sh`, `install-log.ps1` | Fluent Bit input configs: `linux.conf`, `docker.conf`, `proxmox.conf`, `unifi.conf`, `bmc.conf`, `truenas.conf` (Linux); `windows.conf`, `dc.conf`, `hmail.conf` (Windows). | |
 | `pubkeys/` | `install-ssh.sh` | One SSH public key file per user, named `<username>.pub`. |
+| `lib/` | `install-docker.sh`, `install-log.sh`, `install-mon.sh`, `install-ssh.sh`, `install-swap.sh` | `common.sh`: shared output helpers, the install log (`/var/log/datacore-install.log`, root-only since 2026-10-31) and `apt_update`. Sourced by the scripts' resolved path, so they need the whole checkout, not a single copied file. |
 
 ## Provisioning a new server
 
