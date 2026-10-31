@@ -143,7 +143,6 @@ parse_size() {
     case "$raw" in
         *G|*GB) echo $(( ${raw%%G*} * 1024 )) ;;
         *M|*MB) echo "${raw%%M*}" ;;
-        *[!0-9]*) die "Invalid --size '$1'. Use e.g. 8G, 4096M or 8." ;;
         *) echo $(( raw * 1024 )) ;;
     esac
 }
@@ -156,6 +155,9 @@ parse_args() {
         case "$1" in
             --size)
                 [[ $# -ge 2 && -n "$2" ]] || die "--size requires a value (e.g. 8G, 4096M)"
+                # Checked here: parse_size runs in $(...), where die only
+                # ends the subshell and the message is swallowed
+                [[ "${2^^}" =~ ^[0-9]+([GM]B?)?$ ]] || die "Invalid --size '$2'. Use e.g. 8G, 4096M or 8."
                 OPT_SIZE="$2"; shift 2 ;;
             --swappiness)
                 [[ $# -ge 2 && -n "$2" ]] || die "--swappiness requires a value (0-200)"
@@ -424,6 +426,14 @@ step_create_swapfile() {
     if [[ -f "$SWAPFILE" ]]; then
         local current_bytes
         current_bytes=$(stat -c %s "$SWAPFILE")
+        # MemTotal moves by a few MB with a new kernel or ballooning. For the
+        # automatic size, a file within 5 % is kept instead of rewriting GBs.
+        if [[ -z "$OPT_SIZE" ]] && (( current_bytes != target_bytes )) &&
+            (( current_bytes * 100 >= target_bytes * 95 && current_bytes * 100 <= target_bytes * 105 )); then
+            info "${SWAPFILE} is $(fmt_mb $(( current_bytes / 1024 / 1024 ))), within 5 % of the automatic size — kept"
+            TARGET_MB=$(( current_bytes / 1024 / 1024 ))
+            target_bytes=$current_bytes
+        fi
         if (( current_bytes == target_bytes )); then
             if grep -q "^${SWAPFILE} " /proc/swaps; then
                 ok "${SWAPFILE} already exists at $(fmt_mb "$TARGET_MB") and is active — nothing to do"
@@ -501,6 +511,10 @@ step_fstab() {
         return 0
     fi
 
+    # Without a final newline the entry would be glued onto the last line
+    if [[ -s "$FSTAB" && -n "$(tail -c 1 "$FSTAB")" ]]; then
+        echo >>"$FSTAB"
+    fi
     printf '%s\tnone\tswap\tsw\t0\t0\n' "$SWAPFILE" >> "$FSTAB"
     ok "Added to ${FSTAB}: ${SWAPFILE} none swap sw 0 0"
 
@@ -536,6 +550,16 @@ vm.swappiness = ${OPT_SWAPPINESS}
 EOF
     ok "Written to ${SYSCTL_CONF} (persists across reboots)"
 
+    # sysctl applies files in name order and the last value wins; 99-sysctl.conf
+    # (-> /etc/sysctl.conf) and other later files would override ours at boot.
+    local other
+    other=$(grep -lsE '^[[:space:]]*vm\.swappiness[[:space:]]*=' /etc/sysctl.conf /etc/sysctl.d/*.conf \
+        | grep -vxF "$SYSCTL_CONF" || true)
+    if [[ -n "$other" ]]; then
+        warn "vm.swappiness is also set in: $(echo "$other" | paste -sd' ')"
+        warn "A file that sorts later wins at boot — remove the setting there."
+    fi
+
     sysctl -q -w "vm.swappiness=${OPT_SWAPPINESS}"
     ok "Applied live: vm.swappiness = ${OPT_SWAPPINESS}"
 }
@@ -551,13 +575,22 @@ step_fix_resume() {
     info "Fixes: 'Gave up waiting for suspend/resume device' at boot"
 
     if [[ "$OPT_DRY_RUN" == true ]]; then
-        echo -e "  ${YELLOW}[dry-run]${NC} clear ${RESUME_CONF}, update-initramfs -u -k all, update-grub"
+        echo -e "  ${YELLOW}[dry-run]${NC} RESUME=none in ${RESUME_CONF}, drop resume= from /etc/default/grub, update-initramfs -u -k all, update-grub"
         return 0
     fi
 
+    # An empty file is not enough: without RESUME initramfs-tools picks a
+    # swap partition by itself.
     mkdir -p "$(dirname "$RESUME_CONF")"
-    : > "$RESUME_CONF"
-    ok "Cleared ${RESUME_CONF}"
+    echo "RESUME=none" > "$RESUME_CONF"
+    ok "RESUME=none in ${RESUME_CONF}"
+
+    # update-grub copies GRUB_CMDLINE_LINUX* as they are
+    if [[ -f /etc/default/grub ]] && grep -qE '^GRUB_CMDLINE_LINUX(_DEFAULT)?=.*resume=' /etc/default/grub; then
+        cp -p /etc/default/grub "/etc/default/grub.bak-$(date +%Y%m%d%H%M%S)"
+        sed -i -E '/^GRUB_CMDLINE_LINUX(_DEFAULT)?=/ s/[[:space:]]?resume=[^[:space:]"]*//g' /etc/default/grub
+        ok "Removed resume= from /etc/default/grub (backup next to it)"
+    fi
 
     update-initramfs -u -k all
     ok "initramfs rebuilt"
