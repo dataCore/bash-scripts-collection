@@ -519,8 +519,13 @@ CONFIG_SNAPSHOT=""
 snapshot_config() {
     CONFIG_SNAPSHOT=$(mktemp -d)
     local f
+    # mkdir + cp instead of "cp --parents": an older coreutils on
+    # dataCoreCode02 failed with "cp: 'etc/fluent-bit': No such file or
+    # directory" there.
     for f in "$DC_ENV" "$DC_CONF" "$DC_PARSERS" "$CONFD"; do
-        [[ -e "$f" ]] && cp -a --parents "$f" "$CONFIG_SNAPSHOT"
+        [[ -e "$f" ]] || continue
+        mkdir -p "${CONFIG_SNAPSHOT}$(dirname "$f")"
+        cp -a "$f" "${CONFIG_SNAPSHOT}${f}"
     done
     return 0
 }
