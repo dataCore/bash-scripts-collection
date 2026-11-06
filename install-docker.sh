@@ -3,15 +3,14 @@
 # install-docker.sh — dataCore Docker CE Installation
 # =============================================================================
 # Usage: install-docker.sh [--subnet <v4-cidr>] [--subnet6 <v6-cidr>]
-#   --subnet <cidr>   IPv4 address pool, e.g. 10.42.0.0/16 (prefix /24 or
-#                     shorter). Required when the last octet of the primary IP
-#                     is outside 16-31 and daemon.json has no pools yet.
+#   --subnet <cidr>   IPv4 address pool (prefix /24 or shorter) instead of
+#                     the default 172.16.0.0/16.
 #   --subnet6 <cidr>  IPv6 fixed-cidr-v6 for docker0. Default: derived from
 #                     the IPv4 pool (a.b.x.x -> fd00:a:b::/64).
 #   -h, --help        Show this help
 #
 # What this script does:
-#   1. Detect primary IP → derive Docker subnet (last octet), or keep the
+#   1. Detect primary IP → use the standard Docker pool, or keep the
 #      address pools already in daemon.json
 #   2. Install prerequisites + nfs-common
 #   3. Add Docker's official apt repository
@@ -23,13 +22,12 @@
 #      every container)
 #   7. Verify installation
 #
-# Subnet derivation (last octet of primary IP, only 16-31 is RFC1918):
-#   192.168.20.25  →  last octet: 25  →  172.25.0.0/16  +  fd00:172:25::/64
-#   10.7.0.30      →  last octet: 30  →  172.30.0.0/16  +  fd00:172:30::/64
-#   192.168.20.11  →  last octet: 11  →  172.11.0.0/16 is public address
-#                     space → aborts unless --subnet is given
-# Address pools that already exist in daemon.json are always kept, so the
-# networks of an existing host never change.
+# Address pool: 172.16.0.0/16 (networks of /24) + fd00:172:16::/64 on every
+# host. Container networks stay local to the host (outgoing traffic is
+# masqueraded to the host IP), so the same pool everywhere is fine; it only
+# must not overlap a real network. Address pools that already exist in
+# daemon.json are always kept, so the networks of an existing host (older
+# 172.<last octet>.0.0/16 scheme) never change.
 #
 # daemon.json is merged, never replaced: keys set by others (e.g. the fluentd
 # log-driver from install-log.sh --docker) are kept. log-driver/log-opts are
@@ -51,6 +49,7 @@ DOCKER_KEYRING_OLD="/etc/apt/keyrings/docker.gpg" # dearmored key of older insta
 DOCKER_SOURCE="/etc/apt/sources.list.d/docker.list"
 DAEMON_JSON="/etc/docker/daemon.json"
 LOG_FILE="/var/log/datacore-install.log"
+DOCKER_POOL_DEFAULT="172.16.0.0/16"   # same on every host
 DOCKER_POOL_SIZE=24
 
 # --------------- Flags & State ------------------------------------------------
@@ -279,15 +278,7 @@ step_detect_network() {
             && warn "--subnet ${DOCKER_SUBNET_V4} is not a private (RFC1918) range"
         DOCKER_POOLS_ALL="${DOCKER_SUBNET_V4} (/${DOCKER_POOL_SIZE})"
     else
-        # Last octet → Docker bridge subnet base. 172.16.0.0/12 is the only
-        # private range in 172.x, so the scheme only works for octets 16-31.
-        local last_octet
-        last_octet=$(awk -F. '{print $NF}' <<< "$PRIMARY_IP")
-        if (( last_octet < 16 || last_octet > 31 )); then
-            err "Last octet ${last_octet} of ${PRIMARY_IP} gives 172.${last_octet}.0.0/16 — public address space, not RFC1918"
-            die "The 172.<octet>.0.0/16 scheme only covers octets 16-31. Pick a free private pool and re-run with --subnet <v4-cidr> (e.g. --subnet 10.42.0.0/16)"
-        fi
-        DOCKER_SUBNET_V4="172.${last_octet}.0.0/16"
+        DOCKER_SUBNET_V4="$DOCKER_POOL_DEFAULT"
         DOCKER_POOLS_ALL="${DOCKER_SUBNET_V4} (/${DOCKER_POOL_SIZE})"
     fi
 
