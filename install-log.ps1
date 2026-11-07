@@ -3,10 +3,13 @@
     install-log.ps1 - dataCore Fluent Bit log agent setup for Windows Server.
 
 .DESCRIPTION
-    Windows counterpart of install-log.sh. Fluent Bit itself is installed and
-    updated by the package (installer, winget, UniGetUI); this script wires it
-    up so that an update can never break the configuration:
+    Windows counterpart of install-log.sh. If Fluent Bit is missing, the
+    script installs the MSI from packages.fluentbit.io (latest release, or
+    -FluentBitVersion). Updates are left to the package (installer, winget,
+    UniGetUI); this script wires Fluent Bit up so that an update can never
+    break the configuration:
 
+    0. Install Fluent Bit if it is not there yet
     1. Detect host IP and VLAN
     2. Prompt for / accept OpenObserve credentials and verify them
     3. Restrict C:\ProgramData\fluent-bit\ (outside the install directory,
@@ -56,6 +59,10 @@
 .PARAMETER Vlan
     Override the VLAN derived from the third octet of the host IP.
 
+.PARAMETER FluentBitVersion
+    Fluent Bit version to install when it is missing (e.g. 5.1.5). Default:
+    the latest release on GitHub. Ignored when Fluent Bit is already installed.
+
 .PARAMETER Dc
     Include the Active Directory event logs (logconfs\dc.conf).
 
@@ -79,6 +86,7 @@ param(
     [string]$Pass,
     [string]$Org = 'default',
     [string]$Vlan,
+    [string]$FluentBitVersion,
     [switch]$Dc,
     [switch]$Hmail
 )
@@ -184,6 +192,51 @@ function Get-ServiceCommandLine {
 }
 
 # =============================================================================
+# Step 0 - Install Fluent Bit (only when missing)
+# =============================================================================
+# The Windows MSI is not signed and packages.fluentbit.io publishes no
+# checksum for it, so integrity rests on HTTPS; the SHA256 is printed for the
+# record. An installed Fluent Bit is never upgraded here (same as on Linux).
+function Install-FluentBit {
+    Write-Section 'Installing Fluent Bit'
+    # Windows PowerShell 5.1 may still default to TLS 1.0/1.1
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+
+    $version = $FluentBitVersion
+    if (-not $version) {
+        try {
+            $rel = Invoke-RestMethod -UseBasicParsing -Uri 'https://api.github.com/repos/fluent/fluent-bit/releases/latest' -Headers @{ 'User-Agent' = 'install-log.ps1' }
+            $version = $rel.tag_name
+        } catch {
+            Stop-Script "Could not determine the latest Fluent Bit release ($($_.Exception.Message)). Re-run with -FluentBitVersion <x.y.z>."
+        }
+    }
+    $version = $version.TrimStart('v')
+    if ($version -notmatch '^\d+\.\d+\.\d+$') { Stop-Script "Invalid Fluent Bit version '$version'." }
+
+    $url = "https://packages.fluentbit.io/windows/fluent-bit-$version-win64.msi"
+    $msi = Join-Path $env:TEMP "fluent-bit-$version-win64.msi"
+    Write-Info "Downloading $url"
+    try {
+        $prevProgress = $ProgressPreference
+        $ProgressPreference = 'SilentlyContinue'   # the progress bar slows Invoke-WebRequest down a lot
+        Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $msi
+    } catch {
+        Stop-Script "Download failed: $($_.Exception.Message)"
+    } finally {
+        $ProgressPreference = $prevProgress
+    }
+    Write-Info "SHA256: $((Get-FileHash -Algorithm SHA256 $msi).Hash)"
+
+    $msiLog = Join-Path $env:TEMP "fluent-bit-$version-install.log"
+    $proc = Start-Process msiexec.exe -ArgumentList "/i `"$msi`" /qn /norestart /l*v `"$msiLog`"" -Wait -PassThru
+    Remove-Item $msi -Force -ErrorAction SilentlyContinue
+    if ($proc.ExitCode -notin 0, 3010) { Stop-Script "msiexec failed with exit code $($proc.ExitCode), see $msiLog." }
+    if (-not (Test-Path $FbBin)) { Stop-Script "Fluent Bit installed, but $FbBin is missing (see $msiLog)." }
+    Write-Ok "Fluent Bit $version installed"
+}
+
+# =============================================================================
 # Step 0 - Preconditions
 # =============================================================================
 function Test-Preconditions {
@@ -192,7 +245,7 @@ function Test-Preconditions {
         Stop-Script 'Run this script as Administrator.'
     }
     if (-not (Test-Path $FbBin)) {
-        Stop-Script "Fluent Bit not found at $FbBin. Install it first (https://fluentbit.io/download/), then re-run."
+        Install-FluentBit
     }
     if (-not (Test-Path $SourceDir)) {
         Stop-Script "logconfs directory not found at $SourceDir."
