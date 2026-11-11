@@ -114,6 +114,9 @@ fi
 _DISTRO_ID=$(grep "^ID=" /etc/os-release 2>/dev/null | cut -d= -f2 | tr -d '"' || true)
 _DISTRO_VER=$(grep "^VERSION_CODENAME=" /etc/os-release 2>/dev/null | cut -d= -f2 | tr -d '"' || true)
 _DISTRO_LIKE=$(grep "^ID_LIKE=" /etc/os-release 2>/dev/null | cut -d= -f2 | tr -d '"' || true)
+# Ubuntu release, also on derivatives such as Linux Mint (UBUNTU_CODENAME)
+_UBUNTU_CODENAME=$(grep "^UBUNTU_CODENAME=" /etc/os-release 2>/dev/null | cut -d= -f2 | tr -d '"' || true)
+[[ -z "$_UBUNTU_CODENAME" && "$_DISTRO_ID" == "ubuntu" ]] && _UBUNTU_CODENAME="$_DISTRO_VER"
 
 # Mitigation installed by --fix
 NFT_TABLE="cve_2026_98432"
@@ -149,9 +152,12 @@ fi
 #                        linux-6.12 6.12.113-1~deb12u1 (DLA-4850-1)
 #   Debian 13 trixie:    linux 6.12.113-1 (DSA-6568-1)
 #   Proxmox 7.0 kernel:  7.0.14-25 – built on Ubuntu-7.0.0-43.43i1, which
-#                        carries the backport (Ubuntu commit 091732b7). Taken
-#                        from the Proxmox forum, not confirmed by Proxmox.
-#   Ubuntu, RHEL:        no fixed kernel as of 2026-10-30 – changelog only
+#                        carries the backport (Ubuntu commit 091732b7; Ubuntu
+#                        lists 7.0.0-43.43 as fixed). Taken from the Proxmox
+#                        forum, not confirmed by Proxmox.
+#   Ubuntu:              per source package and release, see ubuntu_fixed()
+#                        (Ubuntu tracker as of 2026-11-11)
+#   RHEL:                no fixed kernel as of 2026-10-30 – changelog only
 section "[1/3] CVE-2026-98432 – patch status (IPv4 TCP ireq_opt use-after-free)"
 
 CHANGELOG_PATTERN='CVE-2026-98432|e3f33b0a1d89|free inet_opt and ireq_opt'
@@ -159,7 +165,8 @@ CHANGELOG_PATTERN='CVE-2026-98432|e3f33b0a1d89|free inet_opt and ireq_opt'
 # Running kernel package, resolved via the owner of the kernel image.
 KPKG_NAME=""
 KPKG_VER=""
-KPKG_FLAVOUR="none"   # debian | proxmox | none (image not owned by a package)
+KPKG_SRC=""           # source package, Ubuntu tracker naming (linux-signed-* -> linux-*)
+KPKG_FLAVOUR="none"   # debian | ubuntu | proxmox | none (image not owned by a package)
 if command -v dpkg &>/dev/null && [[ -e "/boot/vmlinuz-$(uname -r)" ]]; then
     KPKG_NAME=$(dpkg -S "/boot/vmlinuz-$(uname -r)" 2>/dev/null \
         | awk -F': ' '!/^diversion / { split($1, a, ", "); print a[1]; exit }' || true)
@@ -167,9 +174,11 @@ if command -v dpkg &>/dev/null && [[ -e "/boot/vmlinuz-$(uname -r)" ]]; then
 fi
 if [[ -n "$KPKG_NAME" ]]; then
     KPKG_VER=$(dpkg-query -W -f='${Version}' "$KPKG_NAME" 2>/dev/null || true)
+    KPKG_SRC=$(dpkg-query -W -f='${source:Package}' "$KPKG_NAME" 2>/dev/null || true)
+    [[ "$KPKG_SRC" == linux-signed* ]] && KPKG_SRC="linux${KPKG_SRC#linux-signed}"
     case "$KPKG_NAME" in
         proxmox-kernel-*|pve-kernel-*) KPKG_FLAVOUR="proxmox" ;;
-        *)                             KPKG_FLAVOUR="debian" ;;
+        *) if [[ -n "$_UBUNTU_CODENAME" ]]; then KPKG_FLAVOUR="ubuntu"; else KPKG_FLAVOUR="debian"; fi ;;
     esac
 fi
 
@@ -200,9 +209,40 @@ _kernel_changelog_load() {
     return 0
 }
 
-# Fixed version for the running kernel package, empty when unknown
+# Ubuntu fixed version for source package $1 on release $2:
+# a version, "-" while Ubuntu lists it as vulnerable, empty when not tracked
+ubuntu_fixed() {
+    case "$2:$1" in
+        stonking:linux)              echo "7.3.0-10.10" ;;
+        stonking:linux-raspi)        echo "7.3.0-1004.4" ;;
+        stonking:linux-realtime)     echo "7.3.0-10.10.1" ;;
+        resolute:linux)              echo "7.0.0-43.43" ;;
+        resolute:linux-oem-7.0)      echo "7.0.0-1018.18" ;;
+        resolute:linux-realtime)     echo "7.0.0-43.43.1" ;;
+        resolute:linux-raspi)        echo "-" ;;
+        noble:linux)                 echo "6.8.0-149.149" ;;
+        noble:linux-lowlatency)      echo "6.8.0-149.149.1" ;;
+        noble:linux-raspi)           echo "6.8.0-1068.72" ;;
+        noble:linux-realtime)        echo "6.8.1-1064.65" ;;
+        noble:linux-hwe-7.0)         echo "-" ;;
+        noble:linux-hwe-6.17)        echo "-" ;;
+        jammy:linux)                 echo "5.15.0-203.213" ;;
+        jammy:linux-lowlatency)      echo "5.15.0-198.208" ;;
+        jammy:linux-raspi)           echo "5.15.0-1113.116" ;;
+        jammy:linux-realtime)        echo "5.15.0-1119.128" ;;
+        jammy:linux-hwe-6.8)         echo "-" ;;
+        focal:linux-hwe-5.15)        echo "5.15.0-203.213~20.04.1" ;;
+        focal:linux|bionic:linux|xenial:linux|xenial:linux-hwe) echo "-" ;;
+    esac
+}
+
+# Fixed version for the running kernel package, empty when unknown,
+# "-" when the vendor has no fix yet
 fixed_version() {
     case "$KPKG_FLAVOUR" in
+        ubuntu)
+            ubuntu_fixed "$KPKG_SRC" "$_UBUNTU_CODENAME"
+            ;;
         proxmox)
             case "$KPKG_NAME" in
                 proxmox-kernel-7.0.*) echo "7.0.14-25" ;;
@@ -239,12 +279,12 @@ upstream_fixed() {
     esac
 }
 
-# Result: patched | not_patched | not_tracked | unknown
+# Result: patched | not_patched | no_fix | not_tracked | unknown
 PATCH_STATUS="unknown"
 FIXED_VER=""
 if [[ -n "$KPKG_VER" ]]; then
     FIXED_VER=$(fixed_version)
-    if [[ -n "$FIXED_VER" ]] && dpkg --compare-versions "$KPKG_VER" ge "$FIXED_VER" 2>/dev/null; then
+    if [[ -n "$FIXED_VER" && "$FIXED_VER" != "-" ]] && dpkg --compare-versions "$KPKG_VER" ge "$FIXED_VER" 2>/dev/null; then
         PATCH_STATUS="patched"
     else
         # Changelog catches backports with unusual version strings and
@@ -252,6 +292,9 @@ if [[ -n "$KPKG_VER" ]]; then
         _kernel_changelog_load
         if [[ "$KCHANGELOG_STATE" == "loaded" ]] && grep -qiE "$CHANGELOG_PATTERN" "$KCHANGELOG"; then
             PATCH_STATUS="patched"
+        elif [[ "$FIXED_VER" == "-" ]]; then
+            PATCH_STATUS="no_fix"
+            FIXED_VER=""
         elif [[ -n "$FIXED_VER" ]]; then
             PATCH_STATUS="not_patched"
         else
@@ -278,7 +321,7 @@ if [[ "$CONTAINER" != "none" ]]; then
     info "Running in a container (${CONTAINER}) – kernel $(uname -r) belongs to the host"
 fi
 if [[ -n "$KPKG_VER" ]]; then
-    info "Package     : ${KPKG_NAME} ${KPKG_VER}"
+    info "Package     : ${KPKG_NAME} ${KPKG_VER}${KPKG_SRC:+ (source ${KPKG_SRC}${_UBUNTU_CODENAME:+, Ubuntu ${_UBUNTU_CODENAME}})}"
 fi
 case "$PATCH_STATUS" in
     patched)
@@ -289,10 +332,16 @@ case "$PATCH_STATUS" in
     not_patched)
         warn "Kernel NOT patched – fixed in ${FIXED_VER:-a newer kernel}"
         ;;
+    no_fix)
+        warn "Kernel NOT patched – no fixed ${KPKG_SRC} kernel for ${_UBUNTU_CODENAME} yet"
+        info "  Ubuntu tracker as of 2026-11-11 – https://ubuntu.com/security/CVE-2026-98432"
+        [[ "$KPKG_SRC" == linux-hwe-* ]] && \
+            info "  The ${_UBUNTU_CODENAME} GA kernel (linux-generic) may already be fixed – see ubuntu_fixed()"
+        ;;
     not_tracked)
         miss "No fixed-version data for ${KPKG_NAME} and no fix in its changelog"
-        [[ " ${_DISTRO_ID} ${_DISTRO_LIKE} " == *" ubuntu "* ]] && \
-            info "  Ubuntu had no fixed kernel as of 2026-10-30 – https://ubuntu.com/security/CVE-2026-98432"
+        [[ "$KPKG_FLAVOUR" == "ubuntu" ]] && \
+            info "  ${KPKG_SRC:-source package} on ${_UBUNTU_CODENAME} not in the table – https://ubuntu.com/security/CVE-2026-98432"
         ;;
     unknown)
         miss "Kernel package not identified – patch status unknown"
