@@ -15,6 +15,7 @@
 # 2026-10-19 Respect a pinned kernel, reboot only once per target kernel
 # 2026-10-30 Remove old kernels first when /boot runs out of space
 # 2026-10-30 Warn when no *-security repository is configured
+# 2026-11-11 Derive the /boot space requirement from the installed kernels
 #
 # =======================================================================
 # START script
@@ -153,7 +154,23 @@ fi
 # on device") and leaves dpkg unconfigured. The cleanup below only runs after
 # a successful upgrade, so remove old kernels first when /boot is low, and
 # refuse to upgrade when there is still too little room.
-BOOT_MIN_FREE_MB=300
+# Room needed: the largest installed kernel set (vmlinuz, initrd.img,
+# System.map, config of one version) plus its initrd once more, because
+# update-initramfs writes <initrd>.new next to the old one before replacing
+# it. 300 MB when no kernel is found in /boot. A fixed value would block
+# hosts with a small separate /boot (e.g. 456 MB, two kernels installed).
+boot_need_mb() {
+    local dir="$1" k ver kset initrd need=0
+    for k in "$dir"/vmlinuz-*; do
+        [ -e "$k" ] || continue
+        ver="${k#"$dir"/vmlinuz-}"
+        kset=$(du -cm --apparent-size "$dir"/{vmlinuz,initrd.img,System.map,config}-"$ver" 2>/dev/null | awk 'END { print $1 }')
+        initrd=$(du -m --apparent-size "$dir/initrd.img-$ver" 2>/dev/null | awk '{ print $1 }')
+        [ $((${kset:-0} + ${initrd:-0})) -gt "$need" ] && need=$((${kset:-0} + ${initrd:-0}))
+    done
+    if [ "$need" -gt 0 ]; then echo "$need"; else echo 300; fi
+}
+BOOT_MIN_FREE_MB=$(boot_need_mb /boot)
 boot_free_mb() {
     df -Pm /boot | awk 'NR == 2 { print $4 }'
 }
