@@ -17,8 +17,11 @@
 #    postmap) — or, with --no-auth, switch SASL off and remove that file
 # 4. Rewrite every sender (root@host.lan …) to --from, so the relay sees a
 #    real address it allows the login to send as
-# 5. Check the config and reload postfix
-# 6. [--test <rcpt>] Send a test mail and wait until it has left the queue
+# 5. [--root-to <address>] Forward mail for the local root (cron, smartd,
+#    mdadm, ZFS ZED, unattended-upgrades) via /etc/aliases — without it, that
+#    mail stays in /var/mail/root
+# 6. Check the config and reload postfix
+# 7. [--test <rcpt>] Send a test mail and wait until it has left the queue
 #
 # Required:
 #   --relay <host:port>    Submission relay, e.g. mail.geek.ch:587
@@ -29,6 +32,8 @@
 #                          allows this host by IP)
 #
 # Options:
+#   --root-to <address>    Forward mail for root to <address>,
+#                          e.g. sysadmin@geek.ch
 #   --password-file <f>    Read the relay password from file <f> (first line)
 #   --tls <level>          verify (default): TLS required, certificate must be
 #                          valid for the relay name
@@ -49,7 +54,8 @@
 #
 # Examples (geek.ch):
 #   install-mail.sh --relay mail.geek.ch:587 --user serviceaccount@geek.ch \
-#       --from datacorebackup02@geek.ch --test datacore@geek.ch
+#       --from datacorebackup02@geek.ch --root-to sysadmin@geek.ch \
+#       --test datacore@geek.ch
 #   install-mail.sh --relay mail.geek.ch:465 --user serviceaccount@geek.ch \
 #       --from datacorebackup02@geek.ch            # after the switch to 465
 #   SMTP_PASSWORD=… install-mail.sh --relay smtp.example.com:587 \
@@ -71,6 +77,7 @@ source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib/common.sh"
 POSTFIX_DIR="/etc/postfix"
 SASL_FILE="${POSTFIX_DIR}/sasl_passwd"
 CANONICAL_FILE="${POSTFIX_DIR}/sender_canonical"
+ALIASES_FILE="/etc/aliases"
 BACKUP_ROOT="${POSTFIX_DIR}/install-mail-backup"
 CA_FILE="/etc/ssl/certs/ca-certificates.crt"
 
@@ -82,6 +89,7 @@ OPT_NO_AUTH=false
 OPT_TLS="verify"
 OPT_PASSWORD_FILE=""
 OPT_TEST=""
+OPT_ROOT_TO=""
 OPT_DRY_RUN=false
 
 # Filled in by the steps
@@ -115,7 +123,7 @@ backup_once() {
     BACKUP_DIR="${BACKUP_ROOT}/$(date +%Y%m%d-%H%M%S)"
     install -d -m 700 "$BACKUP_DIR"
     local f
-    for f in "${POSTFIX_DIR}/main.cf" "$SASL_FILE" "$CANONICAL_FILE"; do
+    for f in "${POSTFIX_DIR}/main.cf" "$SASL_FILE" "$CANONICAL_FILE" "$ALIASES_FILE"; do
         if [[ -f "$f" ]]; then cp -a "$f" "$BACKUP_DIR/"; fi
     done
     ok "Backup: ${BACKUP_DIR}"
@@ -159,7 +167,7 @@ write_file() {
 parse_args() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --from|--relay|--user|--password-file|--test|--tls)
+            --from|--relay|--user|--password-file|--test|--tls|--root-to)
                 [[ $# -ge 2 && -n "$2" ]] || die "$1 requires a value (use --help)"
                 case "$1" in
                     --from)          OPT_FROM="$2" ;;
@@ -168,6 +176,7 @@ parse_args() {
                     --password-file) OPT_PASSWORD_FILE="$2" ;;
                     --test)          OPT_TEST="$2" ;;
                     --tls)           OPT_TLS="$2" ;;
+                    --root-to)       OPT_ROOT_TO="$2" ;;
                 esac
                 shift 2 ;;
             --no-auth) OPT_NO_AUTH=true; shift ;;
@@ -189,6 +198,7 @@ parse_args() {
     local addr_re='^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$'
     [[ "$OPT_FROM" =~ $addr_re ]] || die "Invalid --from '${OPT_FROM}'"
     [[ -z "$OPT_TEST" || "$OPT_TEST" =~ $addr_re ]] || die "Invalid --test '${OPT_TEST}'"
+    [[ -z "$OPT_ROOT_TO" || "$OPT_ROOT_TO" =~ $addr_re ]] || die "Invalid --root-to '${OPT_ROOT_TO}'"
     [[ -z "$OPT_USER" || "$OPT_USER" =~ ^[^[:space:]:]+$ ]] || die "Invalid --user '${OPT_USER}'"
 
     [[ "$OPT_RELAY" =~ ^([A-Za-z0-9.-]+):([0-9]+)$ ]] \
@@ -356,7 +366,45 @@ step_sender() {
 }
 
 # =============================================================================
-# Step 5 — Apply
+# Step 5 — Forward root
+# =============================================================================
+# Without --root-to the existing root alias is left as it is.
+step_root_alias() {
+    [[ -n "$OPT_ROOT_TO" ]] || return 0
+    print_section "Mail for root → ${OPT_ROOT_TO}"
+
+    local current=""
+    if [[ -f "$ALIASES_FILE" ]]; then
+        current=$(grep -E '^root[[:space:]]*:' "$ALIASES_FILE" | tail -1 | sed -E 's/^root[[:space:]]*:[[:space:]]*//' || true)
+    fi
+    if [[ "$current" == "$OPT_ROOT_TO" ]]; then
+        ok "root: ${OPT_ROOT_TO} (unchanged)"
+        [[ -f "${ALIASES_FILE}.db" ]] || run newaliases
+        return 0
+    fi
+
+    backup_once
+    if [[ "$OPT_DRY_RUN" == true ]]; then
+        echo -e "  ${YELLOW}[dry-run]${NC} set 'root: ${OPT_ROOT_TO}' in ${ALIASES_FILE}, newaliases"
+        return 0
+    fi
+    touch "$ALIASES_FILE"
+    if grep -qE '^root[[:space:]]*:' "$ALIASES_FILE"; then
+        sed -i -E "s|^root[[:space:]]*:.*|root: ${OPT_ROOT_TO}|" "$ALIASES_FILE"
+    else
+        # Without a final newline the entry would be glued onto the last line
+        if [[ -s "$ALIASES_FILE" && -n "$(tail -c 1 "$ALIASES_FILE")" ]]; then
+            echo >> "$ALIASES_FILE"
+        fi
+        echo "root: ${OPT_ROOT_TO}" >> "$ALIASES_FILE"
+    fi
+    newaliases
+    ok "root: ${OPT_ROOT_TO} (was: ${current:-local mailbox})"
+    CHANGED=true
+}
+
+# =============================================================================
+# Step 6 — Apply
 # =============================================================================
 step_apply() {
     print_section "Apply"
@@ -383,7 +431,7 @@ step_apply() {
 }
 
 # =============================================================================
-# Step 6 — Test Mail
+# Step 7 — Test Mail
 # =============================================================================
 step_test() {
     [[ -n "$OPT_TEST" ]] || return 0
@@ -427,7 +475,7 @@ step_test() {
 }
 
 # =============================================================================
-# Step 7 — Summary
+# Step 8 — Summary
 # =============================================================================
 step_summary() {
     print_section "Summary"
@@ -444,6 +492,11 @@ step_summary() {
     ok "Relay:   ${BOLD}${RELAY_KEY}${NC} (${mode}, ${cert})"
     ok "Login:   ${BOLD}${OPT_USER:-none (--no-auth)}${NC}"
     ok "Sender:  ${BOLD}${OPT_FROM}${NC}"
+    if [[ -n "$OPT_ROOT_TO" ]]; then
+        ok "root →   ${BOLD}${OPT_ROOT_TO}${NC}"
+    else
+        info "Mail for root stays local — add --root-to <address> to forward it"
+    fi
     [[ -n "$BACKUP_DIR" ]] && info "Rollback: cp -a ${BACKUP_DIR}/* ${POSTFIX_DIR}/ && postmap ${SASL_FILE} && systemctl reload postfix"
     echo ""
     info "Test and check:"
@@ -462,7 +515,7 @@ main() {
     [[ "$EUID" -eq 0 ]] || die "This script must be run as root."
 
     log_init
-    log "from=${OPT_FROM} relay=${RELAY_KEY} user=${OPT_USER:-none} tls=${OPT_TLS} test=${OPT_TEST:-none} dry-run=${OPT_DRY_RUN}"
+    log "from=${OPT_FROM} relay=${RELAY_KEY} user=${OPT_USER:-none} tls=${OPT_TLS} root-to=${OPT_ROOT_TO:-none} test=${OPT_TEST:-none} dry-run=${OPT_DRY_RUN}"
 
     print_header "dataCore — Outgoing Mail (Postfix)"
     step_packages
@@ -475,6 +528,7 @@ main() {
     step_relay
     step_login
     step_sender
+    step_root_alias
     step_apply
     step_test
     step_summary
