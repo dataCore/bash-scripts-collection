@@ -11,6 +11,7 @@ scripts=(
     "install-docker.sh:install-docker"
     "install-dockeradminagent.sh:install-dockeradminagent"
     "install-log.sh:install-log"
+    "install-mail.sh:install-mail"
     "install-mon.sh:install-mon"
     "install-ssh.sh:install-ssh"
     "install-swap.sh:install-swap"
