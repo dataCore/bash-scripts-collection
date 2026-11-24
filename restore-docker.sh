@@ -23,6 +23,8 @@
 #            postgres). Compose files/project from the container labels.
 #            GitLab: new .gitlabbackup.tar and .gitlabconfig.tar.gz, wait for
 #            healthy, token from the archive. Timeouts configurable.
+# 2026-11-24 Volume: archives from backup-docker hold the content of _data,
+#            extract them into _data (older archives with _data/ still work)
 #
 # INFO: Run from the docker-compose project directory, e.g.:
 #       cd /etc/docker-compose/datacoreipam/
@@ -784,8 +786,7 @@ elif [ "$TYPE" == volume ]; then
         echo "⚠️  '${OBJNAME}' is an anonymous volume: a recreated container gets a new"
         echo "   one and will not see this data. Copy it over by hand if it is needed."
     fi
-    # The archive holds the volume dir incl. _data/; extracting while a container
-    # writes to it would mix old and new files.
+    # Extracting while a container writes to the volume would mix old and new files.
     INUSE=$(docker ps -q --filter "volume=${OBJNAME}")
     if [ -n "$INUSE" ]; then
         echo "❌ Volume '${OBJNAME}' is used by running container(s): $(docker ps --filter "volume=${OBJNAME}" --format '{{.Names}}' | paste -sd ' ')"
@@ -796,10 +797,19 @@ elif [ "$TYPE" == volume ]; then
     # extract it next to the target, and only then swap the directories. The
     # current content is kept, not deleted.
     echo "  Testing archive..."
-    if ! tar -tzf "$SELECTED" >/dev/null; then
+    if ! LISTING=$(tar -tzf "$SELECTED"); then
         echo "❌ Archive is damaged or unreadable: $SELECTED"
         exit 1
     fi
+    # backup-docker tars the content of the volume (tar -C <Mountpoint> .),
+    # older archives held the volume dir incl. _data/. Old layout: every entry
+    # is '.', '_data' or below '_data'.
+    if grep -qvE '^(\./)?(_data(/.*)?)?$' <<< "$LISTING"; then
+        EXTRACTSUBDIR="_data"
+    else
+        EXTRACTSUBDIR=""
+    fi
+    unset LISTING
     TARGETDIR="${DOCKERROOTDIR}/volumes/${OBJNAME}"
     RESTORE_TS=$(date +%Y%m%d_%H%M%S)
     STAGINGDIR="${TARGETDIR}.restore-${RESTORE_TS}"
@@ -812,8 +822,8 @@ elif [ "$TYPE" == volume ]; then
             exit 1
         fi
     fi
-    mkdir -p "$STAGINGDIR"
-    if ! tar -xzf "$SELECTED" -C "$STAGINGDIR"; then
+    mkdir -p "${STAGINGDIR}/_data"
+    if ! tar -xzf "$SELECTED" --numeric-owner -C "${STAGINGDIR}/${EXTRACTSUBDIR}"; then
         rm -rf "$STAGINGDIR"
         echo "❌ Extracting failed, '${TARGETDIR}' is unchanged."
         exit 1
