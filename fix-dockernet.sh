@@ -88,7 +88,8 @@ done
 #   endpoints <plan.json> <net>     container ids on <net>, one per line
 #   connect <plan.json> <net> <id>  NUL-separated `docker network connect` args
 #   stop <plan.json>                containers to stop (running before)
-#   start <plan.json>               the same, in start order
+#   start <plan.json>               the same as "<order> <id>": 0 no dependencies,
+#                                   1 compose depends_on, 2 network_mode container:
 #   refs <plan.json>                grep patterns of the old public ranges
 # =============================================================================
 read -r -d '' NET_PY <<'PYEOF' || true
@@ -323,7 +324,7 @@ try:
         cs = load(a[0])["containers"]
         for cid, c in sorted(cs.items(), key=lambda kv: kv[1]["order"]):
             if c["running"]:
-                print(cid)
+                print(c["order"], cid)
     elif cmd == "refs":
         for o in load(a[0])["old_public"]:
             n = ipaddress.IPv4Network(o)
@@ -376,13 +377,27 @@ show_refs() {  # show_refs <dir>: references to the old public ranges
     hits=$(grep -rIlE "$re" /etc "${dirs[@]}" \
         --include='*.yml' --include='*.yaml' --include='*.toml' --include='*.conf' \
         --include='*.json' --include='.env' --include='*.env' --include='*.cfg' 2>/dev/null \
-        | grep -vE '^/etc/docker/daemon\.json' || true)
+        | grep -vE '^/etc/docker/daemon\.json' | sort -u || true)
     if [[ -n "$hits" ]]; then
         warn "Files that still name the old range (change by hand, e.g. trustedIPs):"
         while IFS= read -r f; do echo "      ${f}"; done <<<"$hits"
     else
         ok "No file in /etc or the compose directories names the old range"
     fi
+}
+
+wait_healthy() {  # wait_healthy <id>...: until no healthcheck reports "starting", max 3 min
+    local _ id waiting
+    for _ in $(seq 1 90); do
+        waiting=0
+        for id in "$@"; do
+            [[ "$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$id" 2>/dev/null)" == "starting" ]] \
+                && waiting=$((waiting + 1))
+        done
+        (( waiting == 0 )) && return 0
+        sleep 2
+    done
+    warn "${waiting} container(s) still starting after 3 min, going on"
 }
 
 restart_docker() {
@@ -447,10 +462,25 @@ apply_plan() {  # apply_plan <dir>
         migrate_net "$dir" "$net"
     done < <(net_py nets "${dir}/plan.json")
 
+    # Compose waits for depends_on: service_healthy, a plain docker start does
+    # not. So each level is started, then its containers with a healthcheck
+    # get up to 3 min to turn healthy before the next level starts.
     print_section "Starting what was running before"
-    while IFS= read -r id; do
-        docker start "$id" >/dev/null || err "start failed: $(docker inspect -f '{{.Name}}' "$id" 2>/dev/null || echo "$id")"
-    done < <(net_py start "${dir}/plan.json")
+    local order level started
+    for level in 0 1 2; do
+        started=()
+        while read -r order id; do
+            [[ "$order" == "$level" ]] || continue
+            if docker start "$id" >/dev/null; then
+                started+=("$id")
+            else
+                err "start failed: $(docker inspect -f '{{.Name}}' "$id" 2>/dev/null || echo "$id")"
+            fi
+        done < <(net_py start "${dir}/plan.json")
+        [[ ${#started[@]} -gt 0 ]] || continue
+        wait_healthy "${started[@]}"
+        ok "Level ${level}: started ${#started[@]} container(s)"
+    done
     touch "${dir}/done.all"
 }
 
