@@ -268,6 +268,13 @@ step_detect_network() {
         read -r DOCKER_SUBNET_V4 DOCKER_POOL_SIZE <<< "$(head -1 <<< "$pools")"
         DOCKER_POOLS_ALL=$(awk '{printf "%s%s (/%s)", (NR>1 ? ", " : ""), $1, $2}' <<< "$pools")
         ok "Keeping the address pools from ${DAEMON_JSON}"
+        local base size
+        while read -r base size; do
+            [[ "$base" == *:* ]] && continue
+            out=$(net_py check4 "$base" "$size" 2>/dev/null) || continue
+            grep -qx public <<< "$out" \
+                && warn "Address pool ${base} is public address space, not RFC1918 — move it with: fix-dockernet --apply"
+        done <<< "$pools"
         [[ -z "$OPT_SUBNET" ]] \
             || warn "--subnet ${OPT_SUBNET} ignored — ${DAEMON_JSON} already defines address pools"
     elif [[ -n "$OPT_SUBNET" ]]; then
